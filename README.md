@@ -1,1 +1,1 @@
-# gromacs-laucher
+# gromacs-launcher
