@@ -1,0 +1,97 @@
+[project_settings]
+system_name = "LiFSI_DME_TOL_grouped"
+num_replicas = 1
+scripts_dir = "scripts"
+0;276;0cdensity_analysis_script = "density_analysis_tool.py"
+density_analysis_time_crop = "600:1000"
+box_size_nm = 15.0
+num_prod_chunks = 4
+gmx_load_command = "source ~/load_gmx24.sh"
+conda_env = "mdanalysis"
+global_ff_files = ["ffbonded.itp", "ffnonbonded.itp", "forcefield.itp"]
+template_dir = "mdp_templates"
+gmx_executable_path = "/apps/GPP/GROMACS/2024.2/INTEL24.2/IMPI21.13/bin/gmx_mpi"
+
+[system_sizing]
+mode = "target_atoms"
+target_atoms = 12000
+estimate_box_from_atoms = true
+atom_number_density_atoms_per_nm3 = 85.0
+
+# Alternative:
+# mode = "reference_component"
+# reference_component_key = "LiFSI_salt"
+# reference_component_count = 50
+# estimate_box_from_atoms = true
+# atom_number_density_atoms_per_nm3 = 85.0
+
+[screening]
+target_temps = [298.15]
+
+# Example 2: LiFSI:(DME:TOL) = 1:1, with DME:TOL = 2:1 inside the Solvents group
+[[screening.component_ratios]]
+LiFSI_salt = 1.0
+Solvents = 1.0
+
+[slurm_settings]
+account = "cice86"
+partition_setup = "gpp"
+partition_prod = "gpp"
+qos_setup = "gp_debug"
+qos_prod = "gp_resa"
+time_setup = "02:00:00"
+time_prod = "72:00:00"
+ntasks_setup = 24
+ntasks_prod = 48
+
+[[species]]
+name = "Li"
+resname = "Li"
+itp = ["li.itp"]
+gro = "li.gro"
+atoms_per_molecule = 1
+
+[[species]]
+name = "FSI"
+resname = "FSI"
+itp = ["fsi.itp"]
+gro = "fsi_freq.gro"
+atoms_per_molecule = 7
+
+[[species]]
+name = "DME"
+resname = "DME"
+itp = ["dme_qforce_cm5_1.itp", "dme_qforce_cm5_09.itp"]
+gro = "dme.gro"
+atoms_per_molecule = 16
+
+[[species]]
+name = "TOL"
+resname = "TOL"
+itp = ["tol_qforce_cm5_1.itp", "tol_qforce_cm5_09.itp"]
+gro = "tol.gro"
+atoms_per_molecule = 15
+
+[groups.LiFSI_salt]
+stoichiometric_ratio = { Li = 1, FSI = 1 }
+
+[groups.Solvents]
+# DME:TOL = 2:1 inside the solvent group
+stoichiometric_ratio = { DME = 2, TOL = 1 }
+
+[simulation_settings.press]
+ref_p = 1.0
+ref_t = 10.0
+nsteps = 150000
+dt = 0.002
+
+[simulation_settings.anneal]
+ref_p = 1.0
+temp_high = 500.0
+annealing_time = "0 200 400 1000"
+nsteps = 500000
+dt = 0.002
+
+[simulation_settings.prod]
+nsteps = 500000
+dt = 0.002

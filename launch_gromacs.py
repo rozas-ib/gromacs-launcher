@@ -1,4 +1,5 @@
-import os, shutil, subprocess, itertools, sys, argparse, re
+import os, shutil, subprocess, itertools, sys, argparse, re, math
+from datetime import datetime
 
 try:
     import tomllib
@@ -548,6 +549,34 @@ fi
 """
     with open(os.path.join(path, f"run_prod_{chunk_idx}.sh"), "w") as f: f.write(script_content)
 
+def make_job_logger(sys_path, label):
+    os.makedirs(sys_path, exist_ok=True)
+    log_path = os.path.join(sys_path, "launch.log")
+
+    def _log(msg):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {msg}\n")
+
+    _log("=" * 100)
+    _log(f"Starting launch workflow for {label}")
+    return _log, log_path
+
+def format_final_molar_ratio(component_counts, group_keys):
+    values = [int(component_counts.get(k, 0)) for k in group_keys]
+    positive = [v for v in values if v > 0]
+    if not positive:
+        return "all components are zero"
+    gcd_val = positive[0]
+    for v in positive[1:]:
+        gcd_val = math.gcd(gcd_val, v)
+    reduced = {k: (int(component_counts.get(k, 0)) // gcd_val) for k in group_keys}
+    total = sum(values)
+    fractions = {k: (int(component_counts.get(k, 0)) / total if total > 0 else 0.0) for k in group_keys}
+    reduced_str = ":".join(str(reduced[k]) for k in group_keys)
+    frac_str = ", ".join(f"{k}={fractions[k]:.6f}" for k in group_keys)
+    return f"reduced={reduced_str} ({', '.join(group_keys)}), mole_fractions=({frac_str})"
+
 def is_setup_complete(rep_root):
     required = [
         os.path.join(rep_root, "1_min", "min_out.gro"),
@@ -669,18 +698,34 @@ def main():
 
         label = build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, order, group_keys)
         sys_path = os.path.abspath(f"data/{label}")
+        job_log, job_log_path = make_job_logger(sys_path, label)
+        job_log(f"Case details: ratio={ratio_name}, ff={ff_name}, temp={fmt_num(temp)} K")
+        job_log(f"Log file path: {job_log_path}")
         
         counts, sizing_info = resolve_system_size(
             cfg, sp, order, group_defs, group_keys,
             component_ratio
         )
+        job_log(
+            "Resolved system size: "
+            f"mode={sizing_info['mode']}, total_groups={sizing_info['n_total_components']}, "
+            f"box_nm={sizing_info['box_size_nm']:.3f}, "
+            f"species_counts={', '.join(f'{k}={counts[k]}' for k in order)}"
+        )
+        component_counts = sizing_info.get("component_counts", {})
+        job_log(
+            "Final achieved molar ratio from rounded group counts: "
+            + format_final_molar_ratio(component_counts, group_keys)
+        )
 
         if args.dry_run:
+            job_log("Dry-run enabled. No file generation, no GROMACS, no Slurm submission.")
             print_dry_run_case(label, temp, ratio_name, ff_name, counts, order, group_keys, component_ratio, active_itps, sizing_info)
             continue
 
         for r in range(1, cfg['project_settings']['num_replicas'] + 1):
             rep_root = os.path.join(sys_path, f"rep_{r}")
+            job_log(f"Replica {r}: preparing stage folders and topology/MDP inputs in {rep_root}")
             for stage in ["1_min", "2_press", "3_anneal", "4_prod"]:
                 dest = os.path.join(rep_root, stage); os.makedirs(dest, exist_ok=True)
                 for f in cfg["project_settings"]["global_ff_files"]: shutil.copy(f"inputs/{f}", f"{dest}/{f}")
@@ -710,14 +755,17 @@ def main():
             min_dir = os.path.join(rep_root, "1_min")
             ins_log_abs = os.path.join(min_dir, "insert-molecules.log")
             curr, box = None, sizing_info["box_size_nm"]
+            job_log(f"Replica {r}: building initial box in 1_min (target box={box:.3f} nm).")
             with open(ins_log_abs, "w") as l: l.write("=== BOX LOG ===\n")
 
             for k in order:
                 if counts[k] <= 0:
                     with open(ins_log_abs, "a") as l: l.write(f"\n--- Skipping {k} (nmol=0) ---\n")
+                    job_log(f"Replica {r}: skipped species '{k}' during insert-molecules (nmol=0).")
                     continue
                 out = f"tmp_{k}_{r}.gro"
                 cmd = f"mpirun -np 1 {gmx_path} insert-molecules {'-box '+str(box)+' '+str(box)+' '+str(box) if curr is None else '-f '+curr} -ci inputs/{sp[k]['gro']} -nmol {counts[k]} -o {out} -seed {r*123}"
+                job_log(f"Replica {r}: insert-molecules for '{k}' (nmol={counts[k]}).")
                 res = subprocess.run(cmd.split(), capture_output=True, text=True)
                 with open(ins_log_abs, "a") as l: l.write(f"\n--- Adding {k} ---\n" + res.stdout + res.stderr)
                 if not os.path.exists(out): print(f"FAILED build for {label}. Check {ins_log_abs}"); sys.exit(1)
@@ -725,8 +773,10 @@ def main():
 
             if curr is None:
                 print(f"FAILED build for {label}: no molecules were inserted. Check {ins_log_abs}")
+                job_log(f"Replica {r}: build failed, no molecules inserted. Check {ins_log_abs}")
                 sys.exit(1)
             shutil.move(curr, os.path.join(min_dir, "start.gro"))
+            job_log(f"Replica {r}: built start.gro at {os.path.join(min_dir, 'start.gro')}")
             for f in os.listdir("."): 
                 if f.startswith("tmp_") and f.endswith(".gro"): os.remove(f)
 
@@ -737,12 +787,20 @@ def main():
             has_checkpoint = os.path.exists(os.path.join(prod_dir, "nvt_run.cpt"))
             target_steps = get_target_prod_steps(prod_dir, cfg)
             chunk_status = parse_chunk_err_status(prod_dir, target_steps)
+            job_log(
+                f"Replica {r}: pre-submit checks -> setup_done={setup_done}, has_start={has_start}, "
+                f"has_checkpoint={has_checkpoint}, target_steps={target_steps}, "
+                f"max_step_seen={chunk_status['max_step']}, completed_chunks={chunk_status['completed_chunks']}, "
+                f"next_chunk_idx={chunk_status['next_chunk_idx']}"
+            )
 
             if chunk_status["reached_target"]:
-                print(
+                msg = (
                     f"Skipping {label} R{r}: production reached target steps "
                     f"({chunk_status['max_step']} / {target_steps})."
                 )
+                print(msg)
+                job_log(f"Replica {r}: {msg}")
                 continue
 
             prev = None
@@ -754,9 +812,11 @@ def main():
                     text=True
                 ).stdout.strip()
                 print(f"Launched {label} R{r}: Setup {sid}")
+                job_log(f"Replica {r}: submitted setup job with id {sid}")
                 prev = sid
             else:
                 print(f"{label} R{r}: setup already complete. Skipping setup submission.")
+                job_log(f"Replica {r}: setup already complete, setup submission skipped.")
 
             # Production launch policy:
             # 1) start.gro + no checkpoint => start from beginning (full configured chunk chain)
@@ -771,6 +831,10 @@ def main():
             else:
                 start_chunk_idx = 1
                 prod_jobs = cfg["project_settings"]["num_prod_chunks"]
+            job_log(
+                f"Replica {r}: production policy -> start_chunk_idx={start_chunk_idx}, "
+                f"prod_jobs_to_submit={prod_jobs}"
+            )
 
             for c in range(start_chunk_idx, start_chunk_idx + prod_jobs):
                 write_prod_sh(rep_root, cfg, rep_root, c)
@@ -779,9 +843,14 @@ def main():
                     cmd.append(f"--dependency=afterany:{prev}")
                 cmd.append(os.path.join(rep_root, f"run_prod_{c}.sh"))
                 prev = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+                job_log(f"Replica {r}: submitted production chunk {c} with job id {prev}")
             print(
                 f"Launched {label} R{r}: {prod_jobs} production job(s) submitted "
                 f"(starting at chunk {start_chunk_idx})."
+            )
+            job_log(
+                f"Replica {r}: production submissions complete "
+                f"(count={prod_jobs}, starting_chunk={start_chunk_idx})"
             )
 
 if __name__ == "__main__": main()
