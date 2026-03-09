@@ -1,0 +1,27 @@
+;
+;	File 'topol.top' was generated
+;	By user: unknown (1000)
+;	On host: PC0270
+;	At date: Tue Apr  8 16:21:17 2025
+;
+;	This is a standalone topology file
+;
+;	Created by:
+;	         :-) GROMACS - gmx pdb2gmx, 2023.3-Ubuntu_2023.3_1ubuntu3 (-:
+;	
+;	Executable:   /usr/bin/gmx
+;	Data prefix:  /usr
+;	Working dir:  /home/srozas/ionpoly/pec_ppc_litfsi/tfsi/pdb_itp_build
+;	Command line:
+;	  gmx pdb2gmx -f tfsi.pdb -o tfsi.gro -water none
+;	Force field was read from the standard GROMACS share directory.
+;
+
+[ moleculetype ]
+; Name            nrexcl
+Li              3
+
+[ atoms ]
+;   nr       type  resnr residue  atom   cgnr     charge       mass  typeB    chargeB      massB
+1       opls_406    1       Li          Li       1      0.7        6.941
+
