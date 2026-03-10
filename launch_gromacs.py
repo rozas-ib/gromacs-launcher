@@ -786,32 +786,36 @@ def main():
 	    	
             # --- BUILD BOX ---
             min_dir = os.path.join(rep_root, "1_min")
+            min_start_gro = os.path.join(min_dir, "start.gro")
             ins_log_abs = os.path.join(min_dir, "insert-molecules.log")
             curr, box = None, sizing_info["box_size_nm"]
-            job_log(f"Replica {r}: building initial box in 1_min (target box={box:.3f} nm).")
-            with open(ins_log_abs, "w") as l: l.write("=== BOX LOG ===\n")
+            if os.path.exists(min_start_gro):
+                job_log(f"Replica {r}: found existing 1_min/start.gro at {min_start_gro}; skipping initial box rebuild.")
+            else:
+                job_log(f"Replica {r}: building initial box in 1_min (target box={box:.3f} nm).")
+                with open(ins_log_abs, "w") as l: l.write("=== BOX LOG ===\n")
 
-            for k in order:
-                if counts[k] <= 0:
-                    with open(ins_log_abs, "a") as l: l.write(f"\n--- Skipping {k} (nmol=0) ---\n")
-                    job_log(f"Replica {r}: skipped species '{k}' during insert-molecules (nmol=0).")
-                    continue
-                out = f"tmp_{k}_{r}.gro"
-                cmd = f"mpirun -np 1 {gmx_path} insert-molecules {'-box '+str(box)+' '+str(box)+' '+str(box) if curr is None else '-f '+curr} -ci inputs/{sp[k]['gro']} -nmol {counts[k]} -o {out} -seed {r*123}"
-                job_log(f"Replica {r}: insert-molecules for '{k}' (nmol={counts[k]}).")
-                res = subprocess.run(cmd.split(), capture_output=True, text=True)
-                with open(ins_log_abs, "a") as l: l.write(f"\n--- Adding {k} ---\n" + res.stdout + res.stderr)
-                if not os.path.exists(out): print(f"FAILED build for {label}. Check {ins_log_abs}"); sys.exit(1)
-                curr = out
+                for k in order:
+                    if counts[k] <= 0:
+                        with open(ins_log_abs, "a") as l: l.write(f"\n--- Skipping {k} (nmol=0) ---\n")
+                        job_log(f"Replica {r}: skipped species '{k}' during insert-molecules (nmol=0).")
+                        continue
+                    out = f"tmp_{k}_{r}.gro"
+                    cmd = f"mpirun -np 1 {gmx_path} insert-molecules {'-box '+str(box)+' '+str(box)+' '+str(box) if curr is None else '-f '+curr} -ci inputs/{sp[k]['gro']} -nmol {counts[k]} -o {out} -seed {r*123}"
+                    job_log(f"Replica {r}: insert-molecules for '{k}' (nmol={counts[k]}).")
+                    res = subprocess.run(cmd.split(), capture_output=True, text=True)
+                    with open(ins_log_abs, "a") as l: l.write(f"\n--- Adding {k} ---\n" + res.stdout + res.stderr)
+                    if not os.path.exists(out): print(f"FAILED build for {label}. Check {ins_log_abs}"); sys.exit(1)
+                    curr = out
 
-            if curr is None:
-                print(f"FAILED build for {label}: no molecules were inserted. Check {ins_log_abs}")
-                job_log(f"Replica {r}: build failed, no molecules inserted. Check {ins_log_abs}")
-                sys.exit(1)
-            shutil.move(curr, os.path.join(min_dir, "start.gro"))
-            job_log(f"Replica {r}: built start.gro at {os.path.join(min_dir, 'start.gro')}")
-            for f in os.listdir("."): 
-                if f.startswith("tmp_") and f.endswith(".gro"): os.remove(f)
+                if curr is None:
+                    print(f"FAILED build for {label}: no molecules were inserted. Check {ins_log_abs}")
+                    job_log(f"Replica {r}: build failed, no molecules inserted. Check {ins_log_abs}")
+                    sys.exit(1)
+                shutil.move(curr, min_start_gro)
+                job_log(f"Replica {r}: built start.gro at {min_start_gro}")
+                for f in os.listdir("."): 
+                    if f.startswith("tmp_") and f.endswith(".gro"): os.remove(f)
 
             # --- PRE-SUBMISSION CHECKS ---
             prod_dir = os.path.join(rep_root, "4_prod")
