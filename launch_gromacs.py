@@ -540,11 +540,38 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 GMX="{p.get('gmx_executable_path', 'gmx_mpi')}"
 
 cd {prod_path}
-if [ -f "nvt_run.cpt" ]; then
-    srun $GMX mdrun -v -deffnm nvt_run -cpi nvt_run.cpt -append -maxh 71.7 -pin on
+# Select a TPR file dynamically (supports names like prun.tpr, production.tpr, etc.).
+TPR_FILE=""
+if [ -f "nvt_run.tpr" ]; then
+    TPR_FILE="nvt_run.tpr"
 else
-    srun -n 1 $GMX grompp -f nvt_run.mdp -c start.gro -p topol.top -o nvt_run.tpr > {prod_path}/grompp_prod.log 2>&1
-    srun $GMX mdrun -v -deffnm nvt_run -maxh 71.7 -pin on
+    FIRST_TPR=$(ls -1 *.tpr 2>/dev/null | head -n 1)
+    if [ -n "$FIRST_TPR" ]; then
+        TPR_FILE="$FIRST_TPR"
+    fi
+fi
+
+if [ -n "$TPR_FILE" ]; then
+    DEFFNM="${{TPR_FILE%.tpr}}"
+    CPT_FILE="${DEFFNM}.cpt"
+else
+    DEFFNM="nvt_run"
+    CPT_FILE="nvt_run.cpt"
+fi
+
+if [ -f "$CPT_FILE" ]; then
+    if [ ! -f "$TPR_FILE" ]; then
+        echo "ERROR: $CPT_FILE exists but no matching .tpr file was found. Cannot restart production."
+        exit 1
+    fi
+    srun $GMX mdrun -v -deffnm "$DEFFNM" -s "$TPR_FILE" -cpi "$CPT_FILE" -append -maxh 71.7 -pin on
+else
+    if [ -n "$TPR_FILE" ]; then
+        srun $GMX mdrun -v -deffnm "$DEFFNM" -s "$TPR_FILE" -maxh 71.7 -pin on
+    else
+        srun -n 1 $GMX grompp -f nvt_run.mdp -c start.gro -p topol.top -o nvt_run.tpr > {prod_path}/grompp_prod.log 2>&1
+        srun $GMX mdrun -v -deffnm nvt_run -s nvt_run.tpr -maxh 71.7 -pin on
+    fi
 fi
 """
     with open(os.path.join(path, f"run_prod_{chunk_idx}.sh"), "w") as f: f.write(script_content)
@@ -556,10 +583,13 @@ def make_job_logger(sys_path, label):
     def _log(msg):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"[{ts}] {msg}\n")
+            f.write("\n")
+            for line in str(msg).splitlines():
+                f.write(f"[{ts}] {line}\n")
 
     _log("=" * 100)
-    _log(f"Starting launch workflow for {label}")
+    _log(f"LAUNCH WORKFLOW START: {label}")
+    _log("=" * 100)
     return _log, log_path
 
 def format_final_molar_ratio(component_counts, group_keys):
@@ -725,6 +755,9 @@ def main():
 
         for r in range(1, cfg['project_settings']['num_replicas'] + 1):
             rep_root = os.path.join(sys_path, f"rep_{r}")
+            job_log("-" * 70)
+            job_log(f"Replica {r}")
+            job_log("-" * 70)
             job_log(f"Replica {r}: preparing stage folders and topology/MDP inputs in {rep_root}")
             for stage in ["1_min", "2_press", "3_anneal", "4_prod"]:
                 dest = os.path.join(rep_root, stage); os.makedirs(dest, exist_ok=True)
@@ -787,6 +820,8 @@ def main():
             has_checkpoint = os.path.exists(os.path.join(prod_dir, "nvt_run.cpt"))
             target_steps = get_target_prod_steps(prod_dir, cfg)
             chunk_status = parse_chunk_err_status(prod_dir, target_steps)
+            job_log("Pre-submission checks")
+            job_log("-" * 70)
             job_log(
                 f"Replica {r}: pre-submit checks -> setup_done={setup_done}, has_start={has_start}, "
                 f"has_checkpoint={has_checkpoint}, target_steps={target_steps}, "
@@ -819,9 +854,9 @@ def main():
                 job_log(f"Replica {r}: setup already complete, setup submission skipped.")
 
             # Production launch policy:
-            # 1) start.gro + no checkpoint => start from beginning (full configured chunk chain)
-            # 2) start.gro + checkpoint + not complete => submit exactly one more chunk
-            # 3) no start.gro => setup job is expected to generate it first; then submit full chain
+            # Keep support for multi-chunk submission per launcher execution.
+            # The run script reuses existing nvt_run.tpr and never relies on
+            # backup-renamed files.
             if has_start and not has_checkpoint:
                 start_chunk_idx = 1
                 prod_jobs = cfg["project_settings"]["num_prod_chunks"]
