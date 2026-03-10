@@ -1,91 +1,288 @@
-###### GROMACS MD launcher Workflow - Documentation
+## GROMACS MD Launcher
 
-This is a Python script to run GROMACS simulations workflows in slurm.
-It automates stoichiometry calculations of electrolytes (ction, anion, solvent_1, solvent_2), initial box packing, mdp parameter setting and Slurm job chaining with automatic checkpoint resuming.
+`launch_gromacs.py` prepares and submits screened GROMACS workflows on Slurm. It builds all combinations of:
 
-### 1. Directory Requirements
+- formulation ratios defined in `[[screening.component_ratios]]`
+- target temperatures from `screening.target_temps`
+- force-field sets from `[[screening.force_field]]`
 
-Ensure your root directory is organized as follows before execution:
+For each case and replica, the script prepares stage folders, writes topology and tailored MDP files, builds the initial packed box with `gmx insert-molecules`, submits setup and production jobs, and resumes existing runs when possible.
 
-1. `launch_gromacs.py`: The main script.
-2. `scripts/`: Must contain the `density_analysis_tool.py`.
-3. `mdp_templates/`: Must contain `min.mdp`, `press.mdp`, `anneal.mdp`, and `nvt_run.mdp`.
-4. `inputs/`: Must contain all `.itp` and `.gro` files for your species, plus global forcefield files (e.g., `ffbonded.itp`, `ffnonbonded.itp`, `forcefield.itp`).
+### Repository layout
 
-### 2. Getting Started - Mare Nostrum 5 specific
+The launcher expects this layout:
 
-1. **Prepare the Environment**: Load GROMACS and activate your Conda environment.
+1. `launch_gromacs.py`
+2. `inputs/`
+3. `mdp_templates/`
+4. `scripts/`
 
-   ```bash
-   source ~/load_gmx24.sh
-   conda activate `env-name` 
-   ```
+Required contents:
 
-2. **Generate a Template Config**: Run the script once to create a default JSON file.
+- `inputs/` must contain all species `.gro` files, all `.itp` files referenced by the selected force-field sets, and the global force-field files listed in `project_settings.global_ff_files`.
+- `mdp_templates/` must contain `min.mdp`, `press.mdp`, `anneal.mdp`, and `nvt_run.mdp`.
+- `scripts/` must contain the density analysis script named in `project_settings.density_analysis_script`.
 
-   ```bash
-   python launch_gromacs.py config.json
-   ```
+### Configuration format
 
-3. **Configure your system**: Edit `config.json` to define your concentrations, temperature range, model list and mdp file settings.
+The launcher uses a TOML configuration file. If the file passed on the command line does not exist, the script creates a template TOML file and exits.
 
-4. **Launch Workflow**: Execute the script with your configuration file.
+Default invocation:
 
-   ```bash
-   python launch_gromacs.py config.json
-   ```
+```bash
+python launch_gromacs.py
+```
 
-### 3. Core Logic & Bundling
+This creates `config.toml` if it is missing.
 
-The script uses a specific **"Bundle-then-Cross"** logic to ensure charge models (introduced through a list in itp files) are handled correctly without incorrect mixing:
+Custom config path:
 
-1. **Salt Bundle (Lock-Step)**: The script pairs the "cation" ITP list and "anion" ITP list by index. (e.g., Cation Index 0 always stays with Anion Index 0).
+```bash
+python launch_gromacs.py my_config.toml
+```
 
-2. **Solvent Bundle (Lock-Step)**: The script pairs "solvent_1" and "solvent_2" ITP lists by index.
+Dry-run mode prints the resolved case combinations and species counts without generating files, calling GROMACS, or submitting Slurm jobs:
 
-3. **Cartesian Product**: The script calculates every possible combination between the **Salt Bundle** and the **Solvent Bundle**, crossed with every **Concentration Ratio** and **Temperature**.
+```bash
+python launch_gromacs.py config.toml --dry-run
+```
 
-4. **Strict Order**: To prevent GROMACS topology errors, the script enforces a strict ordering for both box insertion and topology writing: `Cation -> Anion -> Solvent 1 -> Solvent 2`.
+### Runtime environment
 
+The launcher itself needs Python 3.11+ for `tomllib`, or Python < 3.11 with `tomli` installed.
 
-### 4. The Simulation Pipeline
+The submitted setup job script loads the runtime environment from the config:
 
-For every unique variation and replica, the script manages the following stages:
+- `project_settings.gmx_modules`: shell lines inserted near the top of the Slurm job script, typically `module load ...`
+- `project_settings.conda_env`: Conda environment activated in the setup job
+- `project_settings.gmx_executable_path`: absolute path to `gmx_mpi`; if it is missing or invalid during launcher execution, the script falls back to `gmx_mpi` from `PATH`
 
-1. **Box Building**: Performed locally on the login node using `gmx insert-molecules`. A unique random seed is used for every replica. Logs are saved to `insert-molecules.log`.
+There is no hardcoded `source ~/load_gmx24.sh` workflow in the launcher. Any module-loading commands should be declared in `project_settings.gmx_modules`.
 
-2. **Setup Job (S_...)**: A Slurm job that executes Minimization, Pressurization (NPT), and Annealing (NPT, Temperature Ramp) sequentially.
+### Configuration structure
 
-3. **Density Analysis**: Integrated at the end of the Setup job. It automatically finds the frame closest to the average density of the equilibrated system and moves it to the production folder.
+The generated template shows the full schema. The main sections are:
 
-4. **Production Chunks (P1, P2...)**: Chained Slurm jobs using `--dependency=afterany`. Each chunk detects existing `.cpt` files to resume the simulation seamlessly until the total step count is reached.
+- `[project_settings]`: workflow naming, replica count, paths, module commands, Conda environment, global force-field files, box defaults, and number of production chunks to submit
+- `[system_sizing]`: rules for turning formulation ratios into molecule counts
+- `[screening]`: temperatures, component-ratio screening, and force-field screening
+- `[slurm_settings]`: Slurm account, partitions, QoS, walltimes, and CPU layout
+- `[[species]]`: species definitions using a `name` and a `.gro` file
+- `[groups.*]`: top-level formulation groups with stoichiometric ratios over species
+- `[simulation_settings.press]`, `[simulation_settings.anneal]`, `[simulation_settings.prod]`: stage-specific MDP replacements
 
-### 5. Output Organization & Logging
+### Species and groups
 
-All simulation data is stored in the `data/` directory. Logs are redirected to subfolders to keep the root directory clean:
+Species are declared with `[[species]]` entries:
 
-1. **Box Building**: `data/[Variation]/rep_N/1_min/insert-molecules.log`
+```toml
+[[species]]
+name = "cation"
+gro = "li.gro"
+```
 
-2. **Slurm Setup Log**: `data/[Variation]/rep_N/setup.out`
+The launcher reads each GRO file and derives:
 
-3. **Slurm Production Logs**: `data/[Variation]/rep_N/4_prod/chunk_N.out`
+- the residue name used in `[ molecules ]`
+- the atom count per molecule used by atom-based sizing
 
-4. **GROMACS grompp Logs**: Found inside each stage folder (e.g., `grompp_min.log`, `grompp_anneal.log`).
+Groups are defined under `[groups.*]` and reference species names:
 
-5. **Density Plot**: `data/[Variation]/rep_N/3_anneal/density_analysis.png`.
+```toml
+[groups.LiFSI_salt]
+stoichiometric_ratio = { cation = 1, anion = 1 }
+```
 
-### 6. Critical Configuration Parameters
+Formulation ratios are expressed between groups, not directly between species.
 
--`num_replicas`: Number of replicas per system configuration to run.
+### Screening logic
 
--`density_analysis_time_crop`: Time range, in ps, the density_analysis_scripr will use to calculate the average density.
+Each launched case is the Cartesian product of:
 
--`n_solvent_total`: The total count of Solvent 1 + Solvent 2 molecules. Salt count is calculated relative to this.
+1. one entry from `[[screening.component_ratios]]`
+2. one value from `screening.target_temps`
+3. one entry from `[[screening.force_field]]`
 
--`box_size_nm`: The initial box length. Ensure this is large enough to prevent packing failures.
+`[[screening.component_ratios]]` assigns weights to groups. Example:
 
--`num_prod_chunks`: The number of consecutive 72-hour jobs to submit.
+```toml
+[[screening.component_ratios]]
+name = "ratio_1"
+LiFSI_salt = 1.0
+DME_solv = 2.0
+TOL_solv = 2.0
+```
 
--`gmx_executable_path`: The absolute path to the `gmx_mpi` binary.
+`[[screening.force_field]]` maps every active species to an ITP file:
 
+```toml
+[[screening.force_field]]
+name = "ff_set1"
+cation = "li.itp"
+anion = "fsi.itp"
+solvent_1 = "dme_qforce_cm5_1.itp"
+solvent_2 = "tol_qforce_cm5_1.itp"
+```
 
+Case directory names are generated from temperature, ratio-set name, force-field-set name, resolved group weights, and chosen ITP filenames.
+
+### System sizing
+
+The launcher supports two sizing modes in `[system_sizing]`:
+
+1. `mode = "reference_component"`
+2. `mode = "target_atoms"`
+
+`reference_component` mode:
+
+- fixes one top-level group count with `reference_component_key`
+- uses `reference_component_count` as the anchor
+- allocates the remaining group counts to preserve the requested ratio weights
+
+`target_atoms` mode:
+
+- estimates the total number of group units required to approach `target_atoms`
+- uses the atom count derived from each species GRO file
+
+Box size handling:
+
+- if `estimate_box_from_atoms = false`, the script uses `project_settings.box_size_nm`
+- if `estimate_box_from_atoms = true`, the script estimates the box volume from the total atom count and `atom_number_density_atoms_per_nm3`, then applies `project_settings.box_scale_factor`
+
+### What the launcher writes
+
+For every case and replica, the launcher creates:
+
+- `data/<case_label>/launch.log`
+- `data/<case_label>/rep_<N>/1_min`
+- `data/<case_label>/rep_<N>/2_press`
+- `data/<case_label>/rep_<N>/3_anneal`
+- `data/<case_label>/rep_<N>/4_prod`
+
+Inside each stage directory it copies:
+
+- global force-field files
+- the active species ITPs for the selected force-field set
+- the species GRO files
+
+It also writes:
+
+- `topol.top` for every stage
+- stage-specific MDP files copied or tailored from `mdp_templates/`
+- `run_setup.sh`
+- `run_prod_<chunk>.sh`
+
+### Execution pipeline
+
+For each replica, the launcher performs the following steps:
+
+1. Create stage directories and copy/write all required input files.
+2. Build `1_min/start.gro` locally with `gmx insert-molecules`.
+3. Run pre-submission checks to detect existing setup outputs, production start files, checkpoints, and completed chunk logs.
+4. Submit a setup Slurm job if setup is incomplete.
+5. Submit one or more chained production jobs with `sbatch --dependency=afterany:...`.
+
+The setup job runs:
+
+1. minimization in `1_min`
+2. pressure equilibration in `2_press`
+3. annealing in `3_anneal`
+4. density analysis on `anneal.edr`, then moves the selected structure to `4_prod/start.gro`
+
+The production job:
+
+- reuses an existing `nvt_run.tpr` when present
+- resumes from an existing checkpoint when the matching `.cpt` file exists
+- otherwise runs `grompp` and starts a fresh production chunk
+
+### Skip and resume behavior
+
+The launcher is restart-aware and avoids redoing finished work when possible.
+
+Initial box build:
+
+- if `rep_<N>/1_min/start.gro` already exists, the launcher skips rebuilding the minimization start structure
+
+Setup stage:
+
+- the setup job skips minimization if `1_min/min_out.gro` exists
+- it skips pressure equilibration if `2_press/press_out.gro` exists
+- it skips annealing if `3_anneal/anneal_out.gro` exists
+- it skips density analysis if `4_prod/start.gro` already exists
+
+Production stage:
+
+- if chunk logs show the target production step count has already been reached, the replica is skipped entirely
+- if setup is already complete, setup submission is skipped
+- if `4_prod/start.gro` exists but no production checkpoint exists, the launcher submits the configured number of production chunks starting from chunk 1
+- if both `4_prod/start.gro` and `4_prod/nvt_run.cpt` exist, the launcher submits a single continuation chunk starting from the next missing chunk index inferred from existing `chunk_*.err` files
+
+### Logging and outputs
+
+Key output files:
+
+- `data/<case_label>/launch.log`: high-level launcher log for the case
+- `data/<case_label>/rep_<N>/1_min/insert-molecules.log`: packing log from `gmx insert-molecules`
+- `data/<case_label>/rep_<N>/setup.out` and `setup.err`: setup Slurm stdout/stderr
+- `data/<case_label>/rep_<N>/4_prod/chunk_<M>.out` and `chunk_<M>.err`: production Slurm stdout/stderr
+- `data/<case_label>/rep_<N>/*/grompp_*.log`: `grompp` logs per stage
+
+Common stage outputs:
+
+- `1_min/min_out.gro`
+- `2_press/press_out.gro`
+- `3_anneal/anneal_out.gro`
+- `4_prod/start.gro`
+- `4_prod/nvt_run.tpr`
+- `4_prod/nvt_run.cpt`
+
+### Minimal usage workflow
+
+1. Ensure `inputs/`, `mdp_templates/`, and `scripts/` contain the required files.
+2. Generate a template config if needed:
+
+```bash
+python launch_gromacs.py config.toml
+```
+
+3. Edit `config.toml`.
+4. Validate the case matrix without launching jobs:
+
+```bash
+python launch_gromacs.py config.toml --dry-run
+```
+
+5. Launch the workflow:
+
+```bash
+python launch_gromacs.py config.toml
+```
+
+### Important parameters to review
+
+Before launching, verify at least these fields:
+
+- `project_settings.num_replicas`
+- `project_settings.global_ff_files`
+- `project_settings.template_dir`
+- `project_settings.scripts_dir`
+- `project_settings.density_analysis_script`
+- `project_settings.density_analysis_time_crop`
+- `project_settings.num_prod_chunks`
+- `project_settings.gmx_modules`
+- `project_settings.conda_env`
+- `project_settings.gmx_executable_path`
+- `system_sizing.mode`
+- `system_sizing.reference_component_key`
+- `system_sizing.reference_component_count`
+- `system_sizing.target_atoms`
+- `system_sizing.estimate_box_from_atoms`
+- `screening.target_temps`
+- `[[screening.component_ratios]]`
+- `[[screening.force_field]]`
+- `[[species]]`
+- `[groups.*]`
+- `[simulation_settings.press]`
+- `[simulation_settings.anneal]`
+- `[simulation_settings.prod]`
+- `[slurm_settings]`
