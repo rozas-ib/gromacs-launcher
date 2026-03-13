@@ -553,7 +553,7 @@ fi
 
 if [ -n "$TPR_FILE" ]; then
     DEFFNM="${{TPR_FILE%.tpr}}"
-    CPT_FILE="${DEFFNM}.cpt"
+    CPT_FILE="${{DEFFNM}}.cpt"
 else
     DEFFNM="nvt_run"
     CPT_FILE="nvt_run.cpt"
@@ -893,3 +893,4 @@ def main():
             )
 
 if __name__ == "__main__": main()
+
