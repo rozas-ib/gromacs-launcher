@@ -8,18 +8,35 @@
 
 For each case and replica, the script prepares stage folders, writes topology and tailored MDP files, builds the initial packed box with `gmx insert-molecules`, and submits setup and production jobs for initial submission only. Existing replica folders are left untouched by the initial launcher.
 
+The public commands are still `launch_gromacs.py` and `relaunch_failed_gromacs.py`, but the implementation is now split into a modular internal package under `launcher/` so configuration, case generation, Slurm logic, setup logic, reporting, and recovery are maintained separately.
+
 ### Repository layout
 
 The launcher expects this layout:
 
 1. `launch_gromacs.py`
-2. `inputs/`
-3. `mdp_templates/`
-4. `scripts/`
+2. `relaunch_failed_gromacs.py`
+3. `launcher/`
+4. `inputs/`
+5. `mdp_templates/`
+6. `scripts/`
+
+Internal package layout:
+
+1. `launcher/config.py`
+2. `launcher/case_matrix.py`
+3. `launcher/system_setup.py`
+4. `launcher/mdp.py`
+5. `launcher/slurm.py`
+6. `launcher/status_reporting.py`
+7. `launcher/relaunch.py`
+8. `launcher/workflow.py`
+9. `launcher/paths.py`
 
 Required contents:
 
 - `inputs/` must contain all species `.gro` files, all `.itp` files referenced by the selected force-field sets, and the global force-field files listed in `project_settings.global_ff_files`.
+- the file named by `project_settings.topology_forcefield_include` must also exist in `inputs/`
 - `mdp_templates/` must contain `min.mdp`, `press.mdp`, `anneal.mdp`, and `nvt_run.mdp`.
 - `scripts/` must contain the density analysis script named in `project_settings.density_analysis_script`.
 
@@ -58,6 +75,15 @@ output_root = "data_ff_2_tailored"
 
 This keeps different campaigns separated cleanly while preserving the same case-label logic inside the chosen root folder.
 
+If you need a different top-level force-field include in `topol.top`, set for example:
+
+```toml
+[project_settings]
+topology_forcefield_include = "charmm36.itp"
+```
+
+If this key is omitted, the launcher uses `forcefield.itp` by default.
+
 Dry-run mode prints the resolved case combinations and species counts without generating files, calling GROMACS, or submitting Slurm jobs:
 
 ```bash
@@ -94,6 +120,8 @@ pip install -r requirements.txt
 This installs the Python dependencies used by:
 
 - `launch_gromacs.py`
+- `relaunch_failed_gromacs.py`
+- `launcher/*.py`
 - `scripts/density_analysis_tool.py`
 
 External tools are still required separately:
@@ -119,6 +147,7 @@ The generated template shows the full schema. The main sections are:
 
 - `[project_settings]`: workflow naming, replica count, paths, module commands, Conda environment, global force-field files, box defaults, and number of production chunks to submit
 - `[project_settings].output_root`: top-level folder where all case folders and progress tables are written; defaults to `data`
+- `[project_settings].topology_forcefield_include`: filename written as the first `#include` in `topol.top`; defaults to `forcefield.itp`
 - `[system_sizing]`: rules for turning formulation ratios into molecule counts
 - `[screening]`: temperatures, component-ratio screening, and force-field screening
 - `[slurm_settings]`: Slurm account, partitions, QoS, walltimes, and CPU layout
