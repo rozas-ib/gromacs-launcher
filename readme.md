@@ -49,6 +49,15 @@ python launch_gromacs.py config.toml --track-progress
 python relaunch_failed_gromacs.py config.toml --confirm
 ```
 
+If you want a simulation campaign to be written somewhere other than `data/`, set:
+
+```toml
+[project_settings]
+output_root = "data_ff_2_tailored"
+```
+
+This keeps different campaigns separated cleanly while preserving the same case-label logic inside the chosen root folder.
+
 Dry-run mode prints the resolved case combinations and species counts without generating files, calling GROMACS, or submitting Slurm jobs:
 
 ```bash
@@ -109,6 +118,7 @@ There is no hardcoded `source ~/load_gmx24.sh` workflow in the launcher. Any mod
 The generated template shows the full schema. The main sections are:
 
 - `[project_settings]`: workflow naming, replica count, paths, module commands, Conda environment, global force-field files, box defaults, and number of production chunks to submit
+- `[project_settings].output_root`: top-level folder where all case folders and progress tables are written; defaults to `data`
 - `[system_sizing]`: rules for turning formulation ratios into molecule counts
 - `[screening]`: temperatures, component-ratio screening, and force-field screening
 - `[slurm_settings]`: Slurm account, partitions, QoS, walltimes, and CPU layout
@@ -198,11 +208,11 @@ Box size handling:
 
 For every case and replica, the launcher creates:
 
-- `data/<case_label>/launch.log`
-- `data/<case_label>/rep_<N>/1_min`
-- `data/<case_label>/rep_<N>/2_press`
-- `data/<case_label>/rep_<N>/3_anneal`
-- `data/<case_label>/rep_<N>/4_prod`
+- `<output_root>/<case_label>/launch.log`
+- `<output_root>/<case_label>/rep_<N>/1_min`
+- `<output_root>/<case_label>/rep_<N>/2_press`
+- `<output_root>/<case_label>/rep_<N>/3_anneal`
+- `<output_root>/<case_label>/rep_<N>/4_prod`
 
 Inside each stage directory it copies:
 
@@ -217,7 +227,7 @@ It also writes:
 - `run_setup.sh`
 - `run_prod_<chunk>.sh`
 - `rep_<N>/grompp.log` in each replica directory as an aggregated log of `insert-molecules` and `grompp` stage logs for that replica
-- `data/simulation_progress.md` and `data/simulation_progress.csv` as a stage-by-stage progress snapshot for all case/replica combinations in the current config
+- `<output_root>/simulation_progress.md` and `<output_root>/simulation_progress.csv` as a stage-by-stage progress snapshot for all case/replica combinations in the current config
 
 ### Execution pipeline
 
@@ -280,14 +290,14 @@ Production stage:
 
 Key output files:
 
-- `data/<case_label>/launch.log`: high-level launcher log for the case
-- `data/<case_label>/rep_<N>/grompp.log`: aggregated replica-level log rebuilt from that replica's `insert-molecules.log` and `grompp_*.log` files, then appended by new setup/production `grompp` attempts for that replica
-- `data/simulation_progress.md`: human-readable progress table with one row per simulation replica
-- `data/simulation_progress.csv`: spreadsheet-friendly version of the same progress table
-- `data/<case_label>/rep_<N>/1_min/insert-molecules.log`: packing log from `gmx insert-molecules`
-- `data/<case_label>/rep_<N>/setup.out` and `setup.err`: setup Slurm stdout/stderr
-- `data/<case_label>/rep_<N>/4_prod/chunk_<M>.out` and `chunk_<M>.err`: production Slurm stdout/stderr
-- `data/<case_label>/rep_<N>/*/grompp_*.log`: `grompp` logs per stage
+- `<output_root>/<case_label>/launch.log`: high-level launcher log for the case
+- `<output_root>/<case_label>/rep_<N>/grompp.log`: aggregated replica-level log rebuilt from that replica's `insert-molecules.log` and `grompp_*.log` files, then appended by new setup/production `grompp` attempts for that replica
+- `<output_root>/simulation_progress.md`: human-readable progress table with one row per simulation replica
+- `<output_root>/simulation_progress.csv`: spreadsheet-friendly version of the same progress table
+- `<output_root>/<case_label>/rep_<N>/1_min/insert-molecules.log`: packing log from `gmx insert-molecules`
+- `<output_root>/<case_label>/rep_<N>/setup.out` and `setup.err`: setup Slurm stdout/stderr
+- `<output_root>/<case_label>/rep_<N>/4_prod/chunk_<M>.out` and `chunk_<M>.err`: production Slurm stdout/stderr
+- `<output_root>/<case_label>/rep_<N>/*/grompp_*.log`: `grompp` logs per stage
 
 The chunk numbering is append-only for production resubmissions. If a production attempt stops early and you relaunch the workflow, the next submission uses a new chunk index instead of reusing the previous one. This preserves the full history of `chunk_*.out/.err` files.
 
@@ -328,7 +338,7 @@ The launcher now also tries to populate the Slurm columns from the most recent k
 
 The rest of the table remains a filesystem snapshot. It reports what has already been created or completed according to the files and logs present in each replica directory.
 
-If you want to refresh only this table while calculations are already running, use `--track-progress`. That mode is read-only with respect to the simulation workflow: it only observes the current files/logs and rewrites `data/simulation_progress.md` and `data/simulation_progress.csv`.
+If you want to refresh only this table while calculations are already running, use `--track-progress`. That mode is read-only with respect to the simulation workflow: it only observes the current files/logs and rewrites `<output_root>/simulation_progress.md` and `<output_root>/simulation_progress.csv`.
 
 `relaunch_failed_gromacs.py` is the recovery entry point:
 

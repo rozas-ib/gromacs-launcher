@@ -31,6 +31,7 @@ def create_default_config(filename):
 
 [project_settings]
 system_name = "LiFSI_DME_TOL"
+output_root = "data"
 num_replicas = 1
 scripts_dir = "scripts"
 density_analysis_script = "density_analysis_tool.py"
@@ -495,7 +496,14 @@ def rebuild_replica_grompp_log(rep_root):
         )
     return aggregate_path
 
-def build_case_contexts(master_combos, order, group_keys):
+def get_output_root(cfg):
+    project_cfg = cfg.get("project_settings", {})
+    output_root = project_cfg.get("output_root", "data")
+    if not isinstance(output_root, str) or not output_root.strip():
+        raise ValueError("project_settings.output_root must be a non-empty string")
+    return os.path.abspath(output_root.strip())
+
+def build_case_contexts(master_combos, order, group_keys, output_root):
     contexts = []
     for ratio_entry, temp, ff_entry in master_combos:
         ratio_name = ratio_entry["name"]
@@ -503,7 +511,7 @@ def build_case_contexts(master_combos, order, group_keys):
         ff_name = ff_entry["name"]
         active_itps = ff_entry["species_itps"]
         label = build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, order, group_keys)
-        sys_path = os.path.abspath(f"data/{label}")
+        sys_path = os.path.join(output_root, label)
         contexts.append({
             "label": label,
             "sys_path": sys_path,
@@ -1255,16 +1263,17 @@ def main():
     # --- 2. CROSS COMBINATIONS ---
     # Cross (Component Ratio) x (Temperature) x (Force-Field Set)
     master_combos = list(itertools.product(component_ratios, to_list(scr["target_temps"]), force_field_sets))
+    output_root = get_output_root(cfg)
 
     print(f"Setting {len(master_combos)} total variations...")
 
-    case_contexts = build_case_contexts(master_combos, order, group_keys)
+    case_contexts = build_case_contexts(master_combos, order, group_keys, output_root)
 
     if args.track_progress:
         progress_rows = collect_progress_snapshot(case_contexts, cfg)
         progress_csv_path, progress_md_path = write_progress_table(
             progress_rows,
-            os.path.abspath("data")
+            output_root
         )
         print(f"Track-progress mode: refreshed {progress_md_path} and {progress_csv_path}")
         return
@@ -1475,7 +1484,7 @@ def main():
 
     progress_csv_path, progress_md_path = write_progress_table(
         progress_rows,
-        os.path.abspath("data")
+        output_root
     )
     print(f"Simulation progress table written to {progress_md_path} and {progress_csv_path}")
 

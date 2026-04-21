@@ -45,7 +45,8 @@ def main():
     component_ratios = lg.normalize_component_ratios(scr, group_keys)
     force_field_sets = lg.normalize_force_field_sets(scr, order)
     master_combos = list(itertools.product(component_ratios, to_list(scr["target_temps"]), force_field_sets))
-    case_contexts = lg.build_case_contexts(master_combos, order, group_keys)
+    output_root = lg.get_output_root(cfg)
+    case_contexts = lg.build_case_contexts(master_combos, order, group_keys, output_root)
     progress_rows = lg.collect_progress_snapshot(case_contexts, cfg)
 
     rows_by_key = {
