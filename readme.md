@@ -51,6 +51,28 @@ python launch_gromacs.py config.toml --dry-run
 
 The launcher itself needs Python 3.11+ for `tomllib`, or Python < 3.11 with `tomli` installed.
 
+Python packages required by this repository are listed in `requirements.txt`.
+
+Recommended setup:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+This installs the Python dependencies used by:
+
+- `launch_gromacs.py`
+- `scripts/density_analysis_tool.py`
+
+External tools are still required separately:
+
+- GROMACS with `gmx_mpi` available either at `project_settings.gmx_executable_path` or on `PATH`
+- Slurm commands such as `sbatch` and `srun`
+- Any cluster-specific environment modules referenced in `project_settings.gmx_modules`
+- Conda, if you use `project_settings.conda_env` inside the generated Slurm scripts
+
 The submitted setup job script loads the runtime environment from the config:
 
 - `project_settings.gmx_modules`: shell lines inserted near the top of the Slurm job script, typically `module load ...`

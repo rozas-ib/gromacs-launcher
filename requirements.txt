@@ -1,0 +1,17 @@
+# Python dependencies for gromacs-launcher
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# Notes:
+# - Python 3.11+ includes tomllib in the standard library, so tomli is only
+#   needed for older Python versions.
+# - GROMACS, Slurm, and any HPC module/Conda setup used by your cluster are
+#   external runtime requirements and are not installed by pip.
+
+numpy
+pandas
+matplotlib
+panedr
+tabulate
+tomli; python_version < "3.11"
