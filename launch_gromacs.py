@@ -470,13 +470,13 @@ def append_file_to_aggregate_log(aggregate_path, source_path, section_title):
         else:
             agg.write("[empty log]\n")
 
-def rebuild_case_grompp_log(sys_path, num_replicas):
-    aggregate_path = os.path.join(sys_path, "grompp.log")
-    os.makedirs(sys_path, exist_ok=True)
+def rebuild_replica_grompp_log(rep_root):
+    aggregate_path = os.path.join(rep_root, "grompp.log")
+    os.makedirs(rep_root, exist_ok=True)
     with open(aggregate_path, "w", encoding="utf-8") as agg:
-        agg.write("GROMACS aggregated setup/production log snapshot\n")
+        agg.write("GROMACS aggregated replica setup/production log snapshot\n")
         agg.write("This file is regenerated on each launcher execution from existing stage logs,\n")
-        agg.write("then appended by new setup/production grompp attempts.\n")
+        agg.write("then appended by new setup/production grompp attempts for this replica.\n")
 
     stage_logs = [
         ("1_min", "insert-molecules.log"),
@@ -485,15 +485,14 @@ def rebuild_case_grompp_log(sys_path, num_replicas):
         ("3_anneal", "grompp_anneal.log"),
         ("4_prod", "grompp_prod.log"),
     ]
-    for replica_idx in range(1, num_replicas + 1):
-        rep_root = os.path.join(sys_path, f"rep_{replica_idx}")
-        for stage, filename in stage_logs:
-            source_path = os.path.join(rep_root, stage, filename)
-            append_file_to_aggregate_log(
-                aggregate_path,
-                source_path,
-                f"Replica {replica_idx} | {stage}/{filename}"
-            )
+    replica_label = os.path.basename(rep_root)
+    for stage, filename in stage_logs:
+        source_path = os.path.join(rep_root, stage, filename)
+        append_file_to_aggregate_log(
+            aggregate_path,
+            source_path,
+            f"{replica_label} | {stage}/{filename}"
+        )
     return aggregate_path
 
 def write_setup_sh(path, cfg, abs_rep_path, aggregate_log_path):
@@ -502,8 +501,6 @@ def write_setup_sh(path, cfg, abs_rep_path, aggregate_log_path):
     analysis_script = os.path.join(os.getcwd(), p['scripts_dir'], p['density_analysis_script'])
     
     script_content = f"""#!/bin/bash
-set -euo pipefail
-
 #SBATCH --job-name=S_{p['system_name']}
 #SBATCH --account={s['account']}
 #SBATCH --partition={s['partition_setup']}
@@ -514,6 +511,8 @@ set -euo pipefail
 #SBATCH --cpus-per-task={s.get('cpus_per_task_setup', 2)}
 #SBATCH --output={abs_rep_path}/setup.out
 #SBATCH --error={abs_rep_path}/setup.err
+
+set -euo pipefail
 
 {module_block}
 source ~/miniconda3/bin/activate {p['conda_env']}
@@ -604,8 +603,6 @@ def write_prod_sh(path, cfg, abs_rep_path, chunk_idx, aggregate_log_path):
     prod_path = os.path.join(abs_rep_path, "4_prod")
     gmx_exe = p.get('gmx_executable_path', 'gmx_mpi')
     script_content = f"""#!/bin/bash
-set -euo pipefail
-
 #SBATCH --job-name=P{chunk_idx}_{p['system_name']}
 #SBATCH --account={s['account']}
 #SBATCH --partition={s['partition_prod']}
@@ -616,6 +613,8 @@ set -euo pipefail
 #SBATCH --cpus-per-task={s.get('cpus_per_task_prod', 2)}
 #SBATCH --output={prod_path}/chunk_{chunk_idx}.out
 #SBATCH --error={prod_path}/chunk_{chunk_idx}.err
+
+set -euo pipefail
 
 {module_block}
 
@@ -1060,6 +1059,35 @@ def collect_progress_snapshot(case_contexts, cfg):
         for label, replica_idx, rep_root in progress_row_refs
     ]
 
+def submit_sbatch(script_path, dependency_job_id=None):
+    cmd = ["sbatch", "--parsable"]
+    if dependency_job_id:
+        cmd.append(f"--dependency=afterany:{dependency_job_id}")
+    cmd.append(script_path)
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"Failed to execute sbatch for '{script_path}': {exc}") from exc
+
+    stdout = (res.stdout or "").strip()
+    stderr = (res.stderr or "").strip()
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"sbatch failed for '{script_path}' with return code {res.returncode}. "
+            f"stderr: {stderr or '[empty]'}"
+        )
+    if not stdout:
+        raise RuntimeError(
+            f"sbatch returned no job id for '{script_path}'. "
+            f"stderr: {stderr or '[empty]'}"
+        )
+    return stdout
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", nargs='?', default="config.toml")
@@ -1135,14 +1163,9 @@ def main():
 
         label = build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, order, group_keys)
         sys_path = os.path.abspath(f"data/{label}")
-        grompp_log_path = rebuild_case_grompp_log(
-            sys_path,
-            cfg['project_settings']['num_replicas']
-        )
         job_log, job_log_path = make_job_logger(sys_path, label)
         job_log(f"Case details: ratio={ratio_name}, ff={ff_name}, temp={fmt_num(temp)} K")
         job_log(f"Log file path: {job_log_path}")
-        job_log(f"Aggregated grompp log path: {grompp_log_path}")
         
         counts, sizing_info = resolve_system_size(
             cfg, sp, order, group_defs, group_keys,
@@ -1177,10 +1200,12 @@ def main():
 
         for r in range(1, cfg['project_settings']['num_replicas'] + 1):
             rep_root = os.path.join(sys_path, f"rep_{r}")
+            grompp_log_path = rebuild_replica_grompp_log(rep_root)
             job_log("-" * 70)
             job_log(f"Replica {r}")
             job_log("-" * 70)
             job_log(f"Replica {r}: preparing stage folders and topology/MDP inputs in {rep_root}")
+            job_log(f"Replica {r}: aggregated grompp log path: {grompp_log_path}")
             for stage in ["1_min", "2_press", "3_anneal", "4_prod"]:
                 dest = os.path.join(rep_root, stage); os.makedirs(dest, exist_ok=True)
                 for f in cfg["project_settings"]["global_ff_files"]: shutil.copy(f"inputs/{f}", f"{dest}/{f}")
@@ -1274,11 +1299,12 @@ def main():
             prev = None
             if not setup_done:
                 write_setup_sh(rep_root, cfg, rep_root, grompp_log_path)
-                sid = subprocess.run(
-                    ["sbatch", "--parsable", os.path.join(rep_root, "run_setup.sh")],
-                    capture_output=True,
-                    text=True
-                ).stdout.strip()
+                try:
+                    sid = submit_sbatch(os.path.join(rep_root, "run_setup.sh"))
+                except RuntimeError as exc:
+                    job_log(f"Replica {r}: ERROR submitting setup job: {exc}")
+                    print(f"ERROR submitting setup job for {label} R{r}: {exc}")
+                    sys.exit(1)
                 if sid:
                     slurm_job_ids.append(sid)
                 print(f"Launched {label} R{r}: Setup {sid}")
@@ -1311,11 +1337,15 @@ def main():
 
             for c in range(start_chunk_idx, start_chunk_idx + prod_jobs):
                 write_prod_sh(rep_root, cfg, rep_root, c, grompp_log_path)
-                cmd = ["sbatch", "--parsable"]
-                if prev:
-                    cmd.append(f"--dependency=afterany:{prev}")
-                cmd.append(os.path.join(rep_root, f"run_prod_{c}.sh"))
-                prev = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+                try:
+                    prev = submit_sbatch(
+                        os.path.join(rep_root, f"run_prod_{c}.sh"),
+                        dependency_job_id=prev,
+                    )
+                except RuntimeError as exc:
+                    job_log(f"Replica {r}: ERROR submitting production chunk {c}: {exc}")
+                    print(f"ERROR submitting production chunk {c} for {label} R{r}: {exc}")
+                    sys.exit(1)
                 if prev:
                     slurm_job_ids.append(prev)
                 job_log(f"Replica {r}: submitted production chunk {c} with job id {prev}")

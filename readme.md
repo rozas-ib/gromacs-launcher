@@ -85,6 +85,8 @@ The submitted setup job script loads the runtime environment from the config:
 - `project_settings.conda_env`: Conda environment activated in the setup job
 - `project_settings.gmx_executable_path`: absolute path to `gmx_mpi`; if it is missing or invalid during launcher execution, the script falls back to `gmx_mpi` from `PATH`
 
+The generated Slurm scripts place all `#SBATCH` directives immediately after the shebang so scheduler options such as `--account`, partitions, and QoS are parsed correctly before the shell body starts.
+
 There is no hardcoded `source ~/load_gmx24.sh` workflow in the launcher. Any module-loading commands should be declared in `project_settings.gmx_modules`.
 
 ### Configuration structure
@@ -199,7 +201,7 @@ It also writes:
 - stage-specific MDP files copied or tailored from `mdp_templates/`
 - `run_setup.sh`
 - `run_prod_<chunk>.sh`
-- `grompp.log` in each case directory as an aggregated log of `insert-molecules` and `grompp` stage logs
+- `rep_<N>/grompp.log` in each replica directory as an aggregated log of `insert-molecules` and `grompp` stage logs for that replica
 - `data/simulation_progress.md` and `data/simulation_progress.csv` as a stage-by-stage progress snapshot for all case/replica combinations in the current config
 
 ### Execution pipeline
@@ -211,6 +213,8 @@ For each replica, the launcher performs the following steps:
 3. Run pre-submission checks to detect existing setup outputs, production start files, checkpoints, and completed chunk logs.
 4. Submit a setup Slurm job if setup is incomplete.
 5. Submit one or more chained production jobs with `sbatch --dependency=afterany:...`.
+
+If `sbatch` fails or returns an empty job id, the launcher now stops immediately and records the submission error in `launch.log` instead of silently continuing.
 
 The setup job runs:
 
@@ -255,7 +259,7 @@ Production stage:
 Key output files:
 
 - `data/<case_label>/launch.log`: high-level launcher log for the case
-- `data/<case_label>/grompp.log`: aggregated case-level log rebuilt from `insert-molecules.log` and all `grompp_*.log` files, then appended by new setup/production `grompp` attempts
+- `data/<case_label>/rep_<N>/grompp.log`: aggregated replica-level log rebuilt from that replica's `insert-molecules.log` and `grompp_*.log` files, then appended by new setup/production `grompp` attempts for that replica
 - `data/simulation_progress.md`: human-readable progress table with one row per simulation replica
 - `data/simulation_progress.csv`: spreadsheet-friendly version of the same progress table
 - `data/<case_label>/rep_<N>/1_min/insert-molecules.log`: packing log from `gmx insert-molecules`
@@ -268,11 +272,12 @@ The chunk numbering is append-only for production resubmissions. If a production
 `grompp.log` is intentionally different from `launch.log`:
 
 - `launch.log` is append-only and keeps the full launcher decision history across reruns
-- `grompp.log` is overwritten at the start of each launcher execution
-- after being overwritten, `grompp.log` is repopulated from any existing `insert-molecules.log` and `grompp_*.log` files already present in the replica folders
-- new `grompp` attempts from the current setup or production submission are then appended to that rebuilt file
+- each replica has its own `rep_<N>/grompp.log`
+- each replica `grompp.log` is overwritten at the start of each launcher execution
+- after being overwritten, each replica `grompp.log` is repopulated from that replica's existing `insert-molecules.log` and `grompp_*.log` files
+- new `grompp` attempts from the current setup or production submission are then appended to that replica-specific file
 
-This means that if `insert-molecules` and minimization `grompp` succeeded, but pressure `grompp` failed, a relaunch will regenerate `grompp.log` with the stored `insert-molecules` and minimization `grompp` logs first, then append the new pressure `grompp` attempt from the resent setup job.
+This means that if `insert-molecules` and minimization `grompp` succeeded, but pressure `grompp` failed for `rep_1`, a relaunch will regenerate `rep_1/grompp.log` with the stored `insert-molecules` and minimization `grompp` logs first, then append the new pressure `grompp` attempt from the resent setup job for that same replica.
 
 The progress table is generated on every launcher run and summarizes each case/replica with columns such as:
 
