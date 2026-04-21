@@ -1,4 +1,4 @@
-import os, shutil, subprocess, itertools, sys, argparse, re, math
+import os, shutil, subprocess, itertools, sys, argparse, re, math, csv
 from datetime import datetime
 
 try:
@@ -451,7 +451,52 @@ def print_dry_run_case(label, temp, ratio_name, ff_name, counts, order, group_ke
         totals_line += f", atoms={sizing_info['total_atoms']}"
     print(totals_line)
 
-def write_setup_sh(path, cfg, abs_rep_path):
+def append_file_to_aggregate_log(aggregate_path, source_path, section_title):
+    if not os.path.exists(source_path):
+        return
+    try:
+        with open(source_path, "r", encoding="utf-8", errors="ignore") as src:
+            content = src.read().rstrip()
+    except OSError:
+        return
+    with open(aggregate_path, "a", encoding="utf-8") as agg:
+        agg.write(f"\n{'=' * 100}\n")
+        agg.write(f"{section_title}\n")
+        agg.write(f"Source: {source_path}\n")
+        agg.write(f"{'=' * 100}\n")
+        if content:
+            agg.write(content)
+            agg.write("\n")
+        else:
+            agg.write("[empty log]\n")
+
+def rebuild_case_grompp_log(sys_path, num_replicas):
+    aggregate_path = os.path.join(sys_path, "grompp.log")
+    os.makedirs(sys_path, exist_ok=True)
+    with open(aggregate_path, "w", encoding="utf-8") as agg:
+        agg.write("GROMACS aggregated setup/production log snapshot\n")
+        agg.write("This file is regenerated on each launcher execution from existing stage logs,\n")
+        agg.write("then appended by new setup/production grompp attempts.\n")
+
+    stage_logs = [
+        ("1_min", "insert-molecules.log"),
+        ("1_min", "grompp_min.log"),
+        ("2_press", "grompp_press.log"),
+        ("3_anneal", "grompp_anneal.log"),
+        ("4_prod", "grompp_prod.log"),
+    ]
+    for replica_idx in range(1, num_replicas + 1):
+        rep_root = os.path.join(sys_path, f"rep_{replica_idx}")
+        for stage, filename in stage_logs:
+            source_path = os.path.join(rep_root, stage, filename)
+            append_file_to_aggregate_log(
+                aggregate_path,
+                source_path,
+                f"Replica {replica_idx} | {stage}/{filename}"
+            )
+    return aggregate_path
+
+def write_setup_sh(path, cfg, abs_rep_path, aggregate_log_path):
     p, s = cfg["project_settings"], cfg["slurm_settings"]
     module_block = "\n".join(p.get("gmx_modules", []))
     analysis_script = os.path.join(os.getcwd(), p['scripts_dir'], p['density_analysis_script'])
@@ -478,14 +523,32 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 BASE="{abs_rep_path}"
 GMX="{p.get('gmx_executable_path', 'gmx_mpi')}"
+AGG_LOG="{aggregate_log_path}"
+
+append_stage_log() {{
+    local stage_label="$1"
+    local file_path="$2"
+    if [ -f "$file_path" ]; then
+        {{
+            printf "\\n====================================================================================================\\n"
+            printf "%s\\n" "$stage_label"
+            printf "Source: %s\\n" "$file_path"
+            printf "====================================================================================================\\n"
+            cat "$file_path"
+            printf "\\n"
+        }} >> "$AGG_LOG"
+    fi
+}}
 
 # 1. MIN
 cd $BASE/1_min
 if [ ! -f "min_out.gro" ]; then
     if ! srun -n 1 $GMX grompp -f min.mdp -c start.gro -p topol.top -o min.tpr > $BASE/1_min/grompp_min.log 2>&1; then
+        append_stage_log "Replica $(basename "$BASE") | 1_min/grompp_min.log" "$BASE/1_min/grompp_min.log"
         echo "ERROR: grompp failed for minimization. See $BASE/1_min/grompp_min.log"
         exit 1
     fi
+    append_stage_log "Replica $(basename "$BASE") | 1_min/grompp_min.log" "$BASE/1_min/grompp_min.log"
     srun $GMX mdrun -deffnm min -c min_out.gro
 else
     echo "Minimization already completed. Skipping."
@@ -495,9 +558,11 @@ fi
 cd $BASE/2_press
 if [ ! -f "press_out.gro" ]; then
     if ! srun -n 1 $GMX grompp -f press.mdp -c ../1_min/min_out.gro -p topol.top -o press.tpr > $BASE/2_press/grompp_press.log 2>&1; then
+        append_stage_log "Replica $(basename "$BASE") | 2_press/grompp_press.log" "$BASE/2_press/grompp_press.log"
         echo "ERROR: grompp failed for pressure equilibration. See $BASE/2_press/grompp_press.log"
         exit 1
     fi
+    append_stage_log "Replica $(basename "$BASE") | 2_press/grompp_press.log" "$BASE/2_press/grompp_press.log"
     srun $GMX mdrun -deffnm press -c press_out.gro -rdd 1.2 -pin on
 else
     echo "Pressure equilibration already completed. Skipping."
@@ -507,9 +572,11 @@ fi
 cd $BASE/3_anneal
 if [ ! -f "anneal_out.gro" ]; then
     if ! srun -n 1 $GMX grompp -f anneal.mdp -c ../2_press/press_out.gro -p topol.top -o anneal.tpr > $BASE/3_anneal/grompp_anneal.log 2>&1; then
+        append_stage_log "Replica $(basename "$BASE") | 3_anneal/grompp_anneal.log" "$BASE/3_anneal/grompp_anneal.log"
         echo "ERROR: grompp failed for annealing. See $BASE/3_anneal/grompp_anneal.log"
         exit 1
     fi
+    append_stage_log "Replica $(basename "$BASE") | 3_anneal/grompp_anneal.log" "$BASE/3_anneal/grompp_anneal.log"
     srun $GMX mdrun -deffnm anneal -c anneal_out.gro -pin on
 else
     echo "Annealing already completed. Skipping."
@@ -531,7 +598,7 @@ fi
 """
     with open(os.path.join(path, "run_setup.sh"), "w") as f: f.write(script_content)
 
-def write_prod_sh(path, cfg, abs_rep_path, chunk_idx):
+def write_prod_sh(path, cfg, abs_rep_path, chunk_idx, aggregate_log_path):
     p, s = cfg["project_settings"], cfg["slurm_settings"]
     module_block = "\n".join(p.get("gmx_modules", []))
     prod_path = os.path.join(abs_rep_path, "4_prod")
@@ -556,6 +623,22 @@ export SRUN_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 GMX="{p.get('gmx_executable_path', 'gmx_mpi')}"
+AGG_LOG="{aggregate_log_path}"
+
+append_stage_log() {{
+    local stage_label="$1"
+    local file_path="$2"
+    if [ -f "$file_path" ]; then
+        {{
+            printf "\\n====================================================================================================\\n"
+            printf "%s\\n" "$stage_label"
+            printf "Source: %s\\n" "$file_path"
+            printf "====================================================================================================\\n"
+            cat "$file_path"
+            printf "\\n"
+        }} >> "$AGG_LOG"
+    fi
+}}
 
 cd {prod_path}
 # Select a TPR file dynamically (supports names like prun.tpr, production.tpr, etc.).
@@ -588,9 +671,11 @@ else
         srun $GMX mdrun -v -deffnm "$DEFFNM" -s "$TPR_FILE" -maxh 71.7 -pin on
     else
         if ! srun -n 1 $GMX grompp -f nvt_run.mdp -c start.gro -p topol.top -o nvt_run.tpr > {prod_path}/grompp_prod.log 2>&1; then
+            append_stage_log "Replica $(basename "$(dirname "$PWD")") | 4_prod/grompp_prod.log" "{prod_path}/grompp_prod.log"
             echo "ERROR: grompp failed for production. See {prod_path}/grompp_prod.log"
             exit 1
         fi
+        append_stage_log "Replica $(basename "$(dirname "$PWD")") | 4_prod/grompp_prod.log" "{prod_path}/grompp_prod.log"
         srun $GMX mdrun -v -deffnm nvt_run -s nvt_run.tpr -maxh 71.7 -pin on
     fi
 fi
@@ -724,11 +809,271 @@ def get_next_unused_chunk_idx(prod_dir):
         return 1
     return max_idx + 1 if max_idx > 0 else 1
 
+def normalize_slurm_state(state):
+    if not state:
+        return "unknown"
+    upper = state.strip().upper()
+    if upper in {"PENDING", "CONFIGURING", "RESV_DEL_HOLD", "REQUEUE_HOLD", "REQUEUED", "SPECIAL_EXIT"}:
+        return "queued"
+    if upper in {"RUNNING", "COMPLETING", "STAGE_OUT", "SUSPENDED"}:
+        return "running"
+    if upper in {"COMPLETED"}:
+        return "completed"
+    if upper in {"FAILED", "NODE_FAIL", "BOOT_FAIL", "OUT_OF_MEMORY"}:
+        return "failed"
+    if upper in {"CANCELLED", "DEADLINE", "PREEMPTED", "REVOKED"} or upper.startswith("CANCELLED"):
+        return "cancelled"
+    if upper in {"TIMEOUT"}:
+        return "timeout"
+    return upper.lower()
+
+def parse_replica_job_ids(log_path, replica_idx):
+    result = {"setup_job_id": None, "prod_job_id": None}
+    if not os.path.exists(log_path):
+        return result
+    setup_pattern = re.compile(
+        rf"Replica {replica_idx}: submitted setup job with id ([^\s]+)"
+    )
+    prod_pattern = re.compile(
+        rf"Replica {replica_idx}: submitted production chunk \d+ with job id ([^\s]+)"
+    )
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                setup_match = setup_pattern.search(line)
+                if setup_match:
+                    result["setup_job_id"] = setup_match.group(1)
+                prod_match = prod_pattern.search(line)
+                if prod_match:
+                    result["prod_job_id"] = prod_match.group(1)
+    except OSError:
+        return result
+    return result
+
+def query_squeue_status(job_ids):
+    if not job_ids or not shutil.which("squeue"):
+        return {}
+    try:
+        res = subprocess.run(
+            [
+                "squeue",
+                "--noheader",
+                "--format=%i|%T",
+                "--jobs",
+                ",".join(job_ids),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return {}
+    if res.returncode != 0:
+        return {}
+    statuses = {}
+    for line in res.stdout.splitlines():
+        parts = line.strip().split("|", 1)
+        if len(parts) != 2:
+            continue
+        job_id, state = parts
+        statuses[job_id.strip()] = normalize_slurm_state(state)
+    return statuses
+
+def query_sacct_status(job_ids):
+    if not job_ids or not shutil.which("sacct"):
+        return {}
+    try:
+        res = subprocess.run(
+            [
+                "sacct",
+                "-n",
+                "-P",
+                "-X",
+                "-j",
+                ",".join(job_ids),
+                "--format=JobIDRaw,State",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return {}
+    if res.returncode != 0:
+        return {}
+    statuses = {}
+    for line in res.stdout.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) < 2:
+            continue
+        job_id, state = parts[0].strip(), parts[1].strip()
+        if not job_id or "." in job_id:
+            continue
+        statuses[job_id] = normalize_slurm_state(state)
+    return statuses
+
+def collect_slurm_status_map(job_ids):
+    unique_ids = [job_id for job_id in dict.fromkeys(job_ids) if job_id]
+    squeue_status = query_squeue_status(unique_ids)
+    sacct_needed = [job_id for job_id in unique_ids if job_id not in squeue_status]
+    sacct_status = query_sacct_status(sacct_needed)
+    status_map = {}
+    for job_id in unique_ids:
+        if job_id in squeue_status:
+            status_map[job_id] = squeue_status[job_id]
+        elif job_id in sacct_status:
+            status_map[job_id] = sacct_status[job_id]
+    return status_map
+
+def status_flag(condition):
+    return "yes" if condition else "no"
+
+def build_progress_row(case_label, rep_idx, rep_root, cfg, launch_log_path, slurm_status_map):
+    min_dir = os.path.join(rep_root, "1_min")
+    press_dir = os.path.join(rep_root, "2_press")
+    anneal_dir = os.path.join(rep_root, "3_anneal")
+    prod_dir = os.path.join(rep_root, "4_prod")
+
+    target_steps = get_target_prod_steps(prod_dir, cfg)
+    chunk_status = parse_chunk_err_status(prod_dir, target_steps)
+    job_ids = parse_replica_job_ids(launch_log_path, rep_idx)
+    tracked_job_id = job_ids["prod_job_id"] or job_ids["setup_job_id"]
+    slurm_status = slurm_status_map.get(tracked_job_id)
+    if not slurm_status:
+        if chunk_status["reached_target"]:
+            slurm_status = "completed"
+        elif tracked_job_id:
+            slurm_status = "unknown"
+        else:
+            slurm_status = "not_submitted"
+
+    row = {
+        "simulation": case_label,
+        "replica": rep_idx,
+        "slurm_job_id": tracked_job_id or "",
+        "slurm_status": slurm_status,
+        "insert_molecules": status_flag(os.path.exists(os.path.join(min_dir, "start.gro"))),
+        "grompp_min": status_flag(os.path.exists(os.path.join(min_dir, "min.tpr"))),
+        "min_run": status_flag(os.path.exists(os.path.join(min_dir, "min_out.gro"))),
+        "grompp_press": status_flag(os.path.exists(os.path.join(press_dir, "press.tpr"))),
+        "press_run": status_flag(os.path.exists(os.path.join(press_dir, "press_out.gro"))),
+        "grompp_anneal": status_flag(os.path.exists(os.path.join(anneal_dir, "anneal.tpr"))),
+        "anneal_run": status_flag(os.path.exists(os.path.join(anneal_dir, "anneal_out.gro"))),
+        "analysis_start_gro": status_flag(os.path.exists(os.path.join(prod_dir, "start.gro"))),
+        "grompp_prod": status_flag(os.path.exists(os.path.join(prod_dir, "nvt_run.tpr"))),
+        "prod_checkpoint": status_flag(os.path.exists(os.path.join(prod_dir, "nvt_run.cpt"))),
+        "prod_target_reached": status_flag(chunk_status["reached_target"]),
+        "max_step_seen": chunk_status["max_step"],
+        "target_steps": target_steps,
+        "next_chunk_idx": max(
+            chunk_status["next_chunk_idx"],
+            get_next_unused_chunk_idx(prod_dir)
+        ),
+    }
+    return row
+
+def write_progress_table(rows, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    csv_path = os.path.join(output_dir, "simulation_progress.csv")
+    md_path = os.path.join(output_dir, "simulation_progress.md")
+    fieldnames = [
+        "simulation",
+        "replica",
+        "slurm_job_id",
+        "slurm_status",
+        "insert_molecules",
+        "grompp_min",
+        "min_run",
+        "grompp_press",
+        "press_run",
+        "grompp_anneal",
+        "anneal_run",
+        "analysis_start_gro",
+        "grompp_prod",
+        "prod_checkpoint",
+        "prod_target_reached",
+        "max_step_seen",
+        "target_steps",
+        "next_chunk_idx",
+    ]
+
+    with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    headers = fieldnames
+    header_labels = {
+        "simulation": "simulation",
+        "replica": "replica",
+        "slurm_job_id": "slurm job id",
+        "slurm_status": "slurm status",
+        "insert_molecules": "insert-molecules",
+        "grompp_min": "grompp min",
+        "min_run": "min run",
+        "grompp_press": "grompp press",
+        "press_run": "press run",
+        "grompp_anneal": "grompp anneal",
+        "anneal_run": "anneal run",
+        "analysis_start_gro": "analysis/start.gro",
+        "grompp_prod": "grompp prod",
+        "prod_checkpoint": "prod cpt",
+        "prod_target_reached": "target steps reached",
+        "max_step_seen": "max step seen",
+        "target_steps": "target steps",
+        "next_chunk_idx": "next chunk",
+    }
+    with open(md_path, "w", encoding="utf-8") as md_file:
+        md_file.write("# Simulation Progress\n\n")
+        md_file.write("Automatically generated by `launch_gromacs.py`.\n\n")
+        md_file.write("| " + " | ".join(header_labels[h] for h in headers) + " |\n")
+        md_file.write("| " + " | ".join("---" for _ in headers) + " |\n")
+        for row in rows:
+            md_file.write("| " + " | ".join(str(row[h]) for h in headers) + " |\n")
+
+    return csv_path, md_path
+
+def collect_progress_snapshot(case_contexts, cfg):
+    slurm_job_ids = []
+    progress_row_refs = []
+    for ctx in case_contexts:
+        for replica_idx in range(1, cfg['project_settings']['num_replicas'] + 1):
+            rep_root = os.path.join(ctx["sys_path"], f"rep_{replica_idx}")
+            progress_row_refs.append((ctx["label"], replica_idx, rep_root))
+            job_ids = parse_replica_job_ids(ctx["job_log_path"], replica_idx)
+            if job_ids["setup_job_id"]:
+                slurm_job_ids.append(job_ids["setup_job_id"])
+            if job_ids["prod_job_id"]:
+                slurm_job_ids.append(job_ids["prod_job_id"])
+
+    slurm_status_map = collect_slurm_status_map(slurm_job_ids)
+    log_path_by_label = {ctx["label"]: ctx["job_log_path"] for ctx in case_contexts}
+    return [
+        build_progress_row(
+            label,
+            replica_idx,
+            rep_root,
+            cfg,
+            log_path_by_label[label],
+            slurm_status_map,
+        )
+        for label, replica_idx, rep_root in progress_row_refs
+    ]
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", nargs='?', default="config.toml")
     parser.add_argument("--dry-run", action="store_true", help="Print computed species counts and exit without running GROMACS or submitting jobs")
+    parser.add_argument(
+        "--track-progress",
+        action="store_true",
+        help="Do not submit or modify simulations; only refresh the progress tables from existing files/logs and Slurm state",
+    )
     args = parser.parse_args()
+
+    if args.dry_run and args.track_progress:
+        print("ERROR: --dry-run and --track-progress cannot be used together.")
+        sys.exit(1)
 
     if not os.path.exists(args.config): create_default_config(args.config)
     with open(args.config, "rb") as f: cfg = tomllib.load(f)
@@ -749,12 +1094,38 @@ def main():
 
     print(f"Setting {len(master_combos)} total variations...")
 
+    case_contexts = []
+    for ratio_entry, temp, ff_entry in master_combos:
+        ratio_name = ratio_entry["name"]
+        component_ratio = ratio_entry["weights"]
+        ff_name = ff_entry["name"]
+        active_itps = ff_entry["species_itps"]
+        label = build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, order, group_keys)
+        sys_path = os.path.abspath(f"data/{label}")
+        case_contexts.append({
+            "label": label,
+            "sys_path": sys_path,
+            "job_log_path": os.path.join(sys_path, "launch.log"),
+        })
+
+    if args.track_progress:
+        progress_rows = collect_progress_snapshot(case_contexts, cfg)
+        progress_csv_path, progress_md_path = write_progress_table(
+            progress_rows,
+            os.path.abspath("data")
+        )
+        print(f"Track-progress mode: refreshed {progress_md_path} and {progress_csv_path}")
+        return
+
     if not args.dry_run:
         # --- GMX DETECTION ---
         gmx_path = cfg["project_settings"].get("gmx_executable_path")
         if not gmx_path or not os.path.exists(gmx_path): gmx_path = shutil.which("gmx_mpi")
         if not gmx_path: print("ERROR: GMX not found"); sys.exit(1)
         
+
+    progress_row_refs = []
+    slurm_job_ids = []
 
     for ratio_entry, temp, ff_entry in master_combos:
         ratio_name = ratio_entry["name"]
@@ -764,9 +1135,14 @@ def main():
 
         label = build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, order, group_keys)
         sys_path = os.path.abspath(f"data/{label}")
+        grompp_log_path = rebuild_case_grompp_log(
+            sys_path,
+            cfg['project_settings']['num_replicas']
+        )
         job_log, job_log_path = make_job_logger(sys_path, label)
         job_log(f"Case details: ratio={ratio_name}, ff={ff_name}, temp={fmt_num(temp)} K")
         job_log(f"Log file path: {job_log_path}")
+        job_log(f"Aggregated grompp log path: {grompp_log_path}")
         
         counts, sizing_info = resolve_system_size(
             cfg, sp, order, group_defs, group_keys,
@@ -783,6 +1159,16 @@ def main():
             "Final achieved molar ratio from rounded group counts: "
             + format_final_molar_ratio(component_counts, group_keys)
         )
+        for r in range(1, cfg['project_settings']['num_replicas'] + 1):
+            job_ids = parse_replica_job_ids(job_log_path, r)
+            if job_ids["setup_job_id"]:
+                slurm_job_ids.append(job_ids["setup_job_id"])
+            if job_ids["prod_job_id"]:
+                slurm_job_ids.append(job_ids["prod_job_id"])
+        for ctx in case_contexts:
+            if ctx["label"] == label:
+                ctx["job_log_path"] = job_log_path
+                break
 
         if args.dry_run:
             job_log("Dry-run enabled. No file generation, no GROMACS, no Slurm submission.")
@@ -850,6 +1236,11 @@ def main():
                     sys.exit(1)
                 shutil.move(curr, min_start_gro)
                 job_log(f"Replica {r}: built start.gro at {min_start_gro}")
+                append_file_to_aggregate_log(
+                    grompp_log_path,
+                    ins_log_abs,
+                    f"Replica {r} | 1_min/insert-molecules.log"
+                )
                 for f in os.listdir("."): 
                     if f.startswith("tmp_") and f.endswith(".gro"): os.remove(f)
 
@@ -877,16 +1268,19 @@ def main():
                 )
                 print(msg)
                 job_log(f"Replica {r}: {msg}")
+                progress_row_refs.append((label, r, rep_root))
                 continue
 
             prev = None
             if not setup_done:
-                write_setup_sh(rep_root, cfg, rep_root)
+                write_setup_sh(rep_root, cfg, rep_root, grompp_log_path)
                 sid = subprocess.run(
                     ["sbatch", "--parsable", os.path.join(rep_root, "run_setup.sh")],
                     capture_output=True,
                     text=True
                 ).stdout.strip()
+                if sid:
+                    slurm_job_ids.append(sid)
                 print(f"Launched {label} R{r}: Setup {sid}")
                 job_log(f"Replica {r}: submitted setup job with id {sid}")
                 prev = sid
@@ -916,12 +1310,14 @@ def main():
             )
 
             for c in range(start_chunk_idx, start_chunk_idx + prod_jobs):
-                write_prod_sh(rep_root, cfg, rep_root, c)
+                write_prod_sh(rep_root, cfg, rep_root, c, grompp_log_path)
                 cmd = ["sbatch", "--parsable"]
                 if prev:
                     cmd.append(f"--dependency=afterany:{prev}")
                 cmd.append(os.path.join(rep_root, f"run_prod_{c}.sh"))
                 prev = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+                if prev:
+                    slurm_job_ids.append(prev)
                 job_log(f"Replica {r}: submitted production chunk {c} with job id {prev}")
             print(
                 f"Launched {label} R{r}: {prod_jobs} production job(s) submitted "
@@ -931,6 +1327,34 @@ def main():
                 f"Replica {r}: production submissions complete "
                 f"(count={prod_jobs}, starting_chunk={start_chunk_idx})"
             )
+
+            progress_row_refs.append((label, r, rep_root))
+
+    if not progress_row_refs:
+        for ctx in case_contexts:
+            for r in range(1, cfg['project_settings']['num_replicas'] + 1):
+                rep_root = os.path.join(ctx["sys_path"], f"rep_{r}")
+                progress_row_refs.append((ctx["label"], r, rep_root))
+
+    slurm_status_map = collect_slurm_status_map(slurm_job_ids)
+    log_path_by_label = {ctx["label"]: ctx["job_log_path"] for ctx in case_contexts}
+    progress_rows = [
+        build_progress_row(
+            label,
+            replica_idx,
+            rep_root,
+            cfg,
+            log_path_by_label[label],
+            slurm_status_map,
+        )
+        for label, replica_idx, rep_root in progress_row_refs
+    ]
+
+    progress_csv_path, progress_md_path = write_progress_table(
+        progress_rows,
+        os.path.abspath("data")
+    )
+    print(f"Simulation progress table written to {progress_md_path} and {progress_csv_path}")
 
 if __name__ == "__main__": main()
 

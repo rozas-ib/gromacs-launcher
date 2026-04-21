@@ -47,6 +47,12 @@ Dry-run mode prints the resolved case combinations and species counts without ge
 python launch_gromacs.py config.toml --dry-run
 ```
 
+Track-progress mode refreshes only the progress tables from the existing case folders, logs, and Slurm state. It does not submit jobs, rebuild input files, rewrite `grompp.log`, or interfere with running calculations:
+
+```bash
+python launch_gromacs.py config.toml --track-progress
+```
+
 ### Runtime environment
 
 The launcher itself needs Python 3.11+ for `tomllib`, or Python < 3.11 with `tomli` installed.
@@ -193,6 +199,8 @@ It also writes:
 - stage-specific MDP files copied or tailored from `mdp_templates/`
 - `run_setup.sh`
 - `run_prod_<chunk>.sh`
+- `grompp.log` in each case directory as an aggregated log of `insert-molecules` and `grompp` stage logs
+- `data/simulation_progress.md` and `data/simulation_progress.csv` as a stage-by-stage progress snapshot for all case/replica combinations in the current config
 
 ### Execution pipeline
 
@@ -247,12 +255,53 @@ Production stage:
 Key output files:
 
 - `data/<case_label>/launch.log`: high-level launcher log for the case
+- `data/<case_label>/grompp.log`: aggregated case-level log rebuilt from `insert-molecules.log` and all `grompp_*.log` files, then appended by new setup/production `grompp` attempts
+- `data/simulation_progress.md`: human-readable progress table with one row per simulation replica
+- `data/simulation_progress.csv`: spreadsheet-friendly version of the same progress table
 - `data/<case_label>/rep_<N>/1_min/insert-molecules.log`: packing log from `gmx insert-molecules`
 - `data/<case_label>/rep_<N>/setup.out` and `setup.err`: setup Slurm stdout/stderr
 - `data/<case_label>/rep_<N>/4_prod/chunk_<M>.out` and `chunk_<M>.err`: production Slurm stdout/stderr
 - `data/<case_label>/rep_<N>/*/grompp_*.log`: `grompp` logs per stage
 
 The chunk numbering is append-only for production resubmissions. If a production attempt stops early and you relaunch the workflow, the next submission uses a new chunk index instead of reusing the previous one. This preserves the full history of `chunk_*.out/.err` files.
+
+`grompp.log` is intentionally different from `launch.log`:
+
+- `launch.log` is append-only and keeps the full launcher decision history across reruns
+- `grompp.log` is overwritten at the start of each launcher execution
+- after being overwritten, `grompp.log` is repopulated from any existing `insert-molecules.log` and `grompp_*.log` files already present in the replica folders
+- new `grompp` attempts from the current setup or production submission are then appended to that rebuilt file
+
+This means that if `insert-molecules` and minimization `grompp` succeeded, but pressure `grompp` failed, a relaunch will regenerate `grompp.log` with the stored `insert-molecules` and minimization `grompp` logs first, then append the new pressure `grompp` attempt from the resent setup job.
+
+The progress table is generated on every launcher run and summarizes each case/replica with columns such as:
+
+- `slurm job id`
+- `slurm status`
+- `insert-molecules`
+- `grompp min`
+- `min run`
+- `grompp press`
+- `press run`
+- `grompp anneal`
+- `anneal run`
+- `analysis/start.gro`
+- `grompp prod`
+- `prod cpt`
+- `target steps reached`
+- `max step seen`
+- `target steps`
+- `next chunk`
+
+The launcher now also tries to populate the Slurm columns from the most recent known job id for each replica:
+
+- it queries `squeue` first for live queue states such as `queued` or `running`
+- if the job is no longer in `squeue`, it falls back to `sacct` when available to recover terminal states such as `completed`, `failed`, `cancelled`, or `timeout`
+- if neither command is available on the current machine, the Slurm status falls back to `completed`, `unknown`, or `not_submitted` based on the files and recorded job ids
+
+The rest of the table remains a filesystem snapshot. It reports what has already been created or completed according to the files and logs present in each replica directory.
+
+If you want to refresh only this table while calculations are already running, use `--track-progress`. That mode is read-only with respect to the simulation workflow: it only observes the current files/logs and rewrites `data/simulation_progress.md` and `data/simulation_progress.csv`.
 
 Common stage outputs:
 
