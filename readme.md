@@ -216,6 +216,7 @@ The production job:
 - reuses an existing `nvt_run.tpr` when present
 - resumes from an existing checkpoint when the matching `.cpt` file exists
 - otherwise runs `grompp` and starts a fresh production chunk
+- exits immediately if `grompp` fails, leaving the previous logs intact for inspection
 
 ### Skip and resume behavior
 
@@ -236,8 +237,10 @@ Production stage:
 
 - if chunk logs show the target production step count has already been reached, the replica is skipped entirely
 - if setup is already complete, setup submission is skipped
-- if `4_prod/start.gro` exists but no production checkpoint exists, the launcher submits the configured number of production chunks starting from chunk 1
-- if both `4_prod/start.gro` and `4_prod/nvt_run.cpt` exist, the launcher submits a single continuation chunk starting from the next missing chunk index inferred from existing `chunk_*.err` files
+- if `4_prod/start.gro` exists but no production checkpoint exists, the launcher submits the configured number of production chunks starting from the next unused chunk index
+- if both `4_prod/start.gro` and `4_prod/nvt_run.cpt` exist, the launcher submits a single continuation chunk using a new chunk number so earlier `chunk_*.out/.err` files are never overwritten
+- if `chunk_1.err` exists for an interrupted first production chunk and a checkpoint is present, a relaunch submits `chunk_2`, not `chunk_1`
+- if `chunk_1` finished and `chunk_2` was interrupted, a relaunch submits `chunk_3`, preserving the logs from both previous chunks
 
 ### Logging and outputs
 
@@ -249,6 +252,8 @@ Key output files:
 - `data/<case_label>/rep_<N>/4_prod/chunk_<M>.out` and `chunk_<M>.err`: production Slurm stdout/stderr
 - `data/<case_label>/rep_<N>/*/grompp_*.log`: `grompp` logs per stage
 
+The chunk numbering is append-only for production resubmissions. If a production attempt stops early and you relaunch the workflow, the next submission uses a new chunk index instead of reusing the previous one. This preserves the full history of `chunk_*.out/.err` files.
+
 Common stage outputs:
 
 - `1_min/min_out.gro`
@@ -257,6 +262,44 @@ Common stage outputs:
 - `4_prod/start.gro`
 - `4_prod/nvt_run.tpr`
 - `4_prod/nvt_run.cpt`
+
+### Restart guide
+
+The recommended way to resend an interrupted or failed calculation is to rerun the same launcher command with the same config file:
+
+```bash
+python launch_gromacs.py config.toml
+```
+
+The launcher decides what to rerun from the files already present in each replica folder.
+
+Scenario 1: minimization, pressurization, and annealing finished, but production `grompp` failed
+
+- setup is considered complete if `4_prod/start.gro` already exists, so setup is skipped
+- production is resubmitted from the prepared production start structure
+- the generated production script now exits immediately if `grompp` fails, so the failure is isolated to `grompp_prod.log` and does not continue into `mdrun`
+- if previous chunk logs already exist, the retry uses the next unused chunk index instead of overwriting earlier `chunk_*.out/.err` files
+
+Scenario 2: minimization and pressurization finished, but annealing `grompp` failed
+
+- minimization and pressurization are skipped because their output GRO files already exist
+- annealing is retried
+- the generated setup script now exits immediately if annealing `grompp` fails, so the job stops cleanly and the error remains in `3_anneal/grompp_anneal.log`
+- density analysis and production are only reached if annealing succeeds
+
+Scenario 3: minimization, pressurization, and annealing finished, production started, but it did not reach the requested `nsteps`, and there is a checkpoint file
+
+- on relaunch, the launcher detects the checkpoint and treats the production as resumable
+- the continuation submission uses a new chunk number instead of reusing the interrupted one
+- for example, if `chunk_1.err` belongs to the interrupted attempt, the relaunch submits `chunk_2`
+- the production script resumes with `mdrun -cpi ... -append`, so the trajectory/checkpoint continuation uses the existing production state while keeping a separate Slurm log file for the new attempt
+
+Scenario 4: minimization, pressurization, and annealing finished, production finished one chunk, but a later chunk was interrupted
+
+- on relaunch, the launcher reads the existing `chunk_*.err` history to determine that production has not yet reached the target number of steps
+- the continuation submission uses the next unused chunk number
+- for example, if `chunk_1` finished and `chunk_2` was interrupted, the relaunch submits `chunk_3`
+- this avoids overwriting `chunk_2.out` or `chunk_2.err` and keeps a complete record of the failed and resumed attempts
 
 ### Minimal usage workflow
 

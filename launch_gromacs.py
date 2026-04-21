@@ -457,6 +457,8 @@ def write_setup_sh(path, cfg, abs_rep_path):
     analysis_script = os.path.join(os.getcwd(), p['scripts_dir'], p['density_analysis_script'])
     
     script_content = f"""#!/bin/bash
+set -euo pipefail
+
 #SBATCH --job-name=S_{p['system_name']}
 #SBATCH --account={s['account']}
 #SBATCH --partition={s['partition_setup']}
@@ -480,7 +482,10 @@ GMX="{p.get('gmx_executable_path', 'gmx_mpi')}"
 # 1. MIN
 cd $BASE/1_min
 if [ ! -f "min_out.gro" ]; then
-    srun -n 1 $GMX grompp -f min.mdp -c start.gro -p topol.top -o min.tpr > $BASE/1_min/grompp_min.log 2>&1
+    if ! srun -n 1 $GMX grompp -f min.mdp -c start.gro -p topol.top -o min.tpr > $BASE/1_min/grompp_min.log 2>&1; then
+        echo "ERROR: grompp failed for minimization. See $BASE/1_min/grompp_min.log"
+        exit 1
+    fi
     srun $GMX mdrun -deffnm min -c min_out.gro
 else
     echo "Minimization already completed. Skipping."
@@ -489,7 +494,10 @@ fi
 # 2. PRESS
 cd $BASE/2_press
 if [ ! -f "press_out.gro" ]; then
-    srun -n 1 $GMX grompp -f press.mdp -c ../1_min/min_out.gro -p topol.top -o press.tpr > $BASE/2_press/grompp_press.log 2>&1
+    if ! srun -n 1 $GMX grompp -f press.mdp -c ../1_min/min_out.gro -p topol.top -o press.tpr > $BASE/2_press/grompp_press.log 2>&1; then
+        echo "ERROR: grompp failed for pressure equilibration. See $BASE/2_press/grompp_press.log"
+        exit 1
+    fi
     srun $GMX mdrun -deffnm press -c press_out.gro -rdd 1.2 -pin on
 else
     echo "Pressure equilibration already completed. Skipping."
@@ -498,7 +506,10 @@ fi
 # 3. ANNEAL
 cd $BASE/3_anneal
 if [ ! -f "anneal_out.gro" ]; then
-    srun -n 1 $GMX grompp -f anneal.mdp -c ../2_press/press_out.gro -p topol.top -o anneal.tpr > $BASE/3_anneal/grompp_anneal.log 2>&1
+    if ! srun -n 1 $GMX grompp -f anneal.mdp -c ../2_press/press_out.gro -p topol.top -o anneal.tpr > $BASE/3_anneal/grompp_anneal.log 2>&1; then
+        echo "ERROR: grompp failed for annealing. See $BASE/3_anneal/grompp_anneal.log"
+        exit 1
+    fi
     srun $GMX mdrun -deffnm anneal -c anneal_out.gro -pin on
 else
     echo "Annealing already completed. Skipping."
@@ -508,7 +519,12 @@ fi
 cd $BASE/3_anneal
 if [ ! -f "$BASE/4_prod/start.gro" ]; then
     python3 {analysis_script} anneal.edr --num_replicas 1 --time_crop {p['density_analysis_time_crop']}
-    [ -f "start_replica_1.gro" ] && mv start_replica_1.gro $BASE/4_prod/start.gro
+    if [ -f "start_replica_1.gro" ]; then
+        mv start_replica_1.gro $BASE/4_prod/start.gro
+    else
+        echo "ERROR: density analysis did not produce start_replica_1.gro"
+        exit 1
+    fi
 else
     echo "Analysis and start.gro for production already exist. Skipping."
 fi
@@ -521,6 +537,8 @@ def write_prod_sh(path, cfg, abs_rep_path, chunk_idx):
     prod_path = os.path.join(abs_rep_path, "4_prod")
     gmx_exe = p.get('gmx_executable_path', 'gmx_mpi')
     script_content = f"""#!/bin/bash
+set -euo pipefail
+
 #SBATCH --job-name=P{chunk_idx}_{p['system_name']}
 #SBATCH --account={s['account']}
 #SBATCH --partition={s['partition_prod']}
@@ -569,7 +587,10 @@ else
     if [ -n "$TPR_FILE" ]; then
         srun $GMX mdrun -v -deffnm "$DEFFNM" -s "$TPR_FILE" -maxh 71.7 -pin on
     else
-        srun -n 1 $GMX grompp -f nvt_run.mdp -c start.gro -p topol.top -o nvt_run.tpr > {prod_path}/grompp_prod.log 2>&1
+        if ! srun -n 1 $GMX grompp -f nvt_run.mdp -c start.gro -p topol.top -o nvt_run.tpr > {prod_path}/grompp_prod.log 2>&1; then
+            echo "ERROR: grompp failed for production. See {prod_path}/grompp_prod.log"
+            exit 1
+        fi
         srun $GMX mdrun -v -deffnm nvt_run -s nvt_run.tpr -maxh 71.7 -pin on
     fi
 fi
@@ -654,10 +675,12 @@ def parse_chunk_err_status(prod_dir, target_steps):
     step_pattern = re.compile(r"\bstep\s+([0-9]+)\b")
 
     idx = 1
+    last_seen_chunk_idx = 0
     while True:
         err_path = os.path.join(prod_dir, f"chunk_{idx}.err")
         if not os.path.exists(err_path):
             break
+        last_seen_chunk_idx = idx
         try:
             with open(err_path, "r", errors="ignore") as f:
                 content = f.read()
@@ -686,7 +709,20 @@ def parse_chunk_err_status(prod_dir, target_steps):
         "max_step": max_step,
         "reached_target": reached_target,
         "next_chunk_idx": max(1, completed_chunks + 1),
+        "last_seen_chunk_idx": last_seen_chunk_idx,
     }
+
+def get_next_unused_chunk_idx(prod_dir):
+    pattern = re.compile(r"^chunk_(\d+)\.(?:out|err)$")
+    max_idx = 0
+    try:
+        for name in os.listdir(prod_dir):
+            match = pattern.match(name)
+            if match:
+                max_idx = max(max_idx, int(match.group(1)))
+    except OSError:
+        return 1
+    return max_idx + 1 if max_idx > 0 else 1
 
 def main():
     parser = argparse.ArgumentParser()
@@ -830,7 +866,8 @@ def main():
                 f"Replica {r}: pre-submit checks -> setup_done={setup_done}, has_start={has_start}, "
                 f"has_checkpoint={has_checkpoint}, target_steps={target_steps}, "
                 f"max_step_seen={chunk_status['max_step']}, completed_chunks={chunk_status['completed_chunks']}, "
-                f"next_chunk_idx={chunk_status['next_chunk_idx']}"
+                f"next_chunk_idx={chunk_status['next_chunk_idx']}, "
+                f"last_seen_chunk_idx={chunk_status['last_seen_chunk_idx']}"
             )
 
             if chunk_status["reached_target"]:
@@ -862,13 +899,16 @@ def main():
             # The run script reuses existing nvt_run.tpr and never relies on
             # backup-renamed files.
             if has_start and not has_checkpoint:
-                start_chunk_idx = 1
+                start_chunk_idx = get_next_unused_chunk_idx(prod_dir)
                 prod_jobs = cfg["project_settings"]["num_prod_chunks"]
             elif has_start and has_checkpoint:
-                start_chunk_idx = chunk_status["next_chunk_idx"]
+                start_chunk_idx = max(
+                    chunk_status["next_chunk_idx"],
+                    get_next_unused_chunk_idx(prod_dir)
+                )
                 prod_jobs = 1
             else:
-                start_chunk_idx = 1
+                start_chunk_idx = get_next_unused_chunk_idx(prod_dir)
                 prod_jobs = cfg["project_settings"]["num_prod_chunks"]
             job_log(
                 f"Replica {r}: production policy -> start_chunk_idx={start_chunk_idx}, "
