@@ -6,7 +6,7 @@
 - target temperatures from `screening.target_temps`
 - force-field sets from `[[screening.force_field]]`
 
-For each case and replica, the script prepares stage folders, writes topology and tailored MDP files, builds the initial packed box with `gmx insert-molecules`, submits setup and production jobs, and resumes existing runs when possible.
+For each case and replica, the script prepares stage folders, writes topology and tailored MDP files, builds the initial packed box with `gmx insert-molecules`, and submits setup and production jobs for initial submission only. Existing replica folders are left untouched by the initial launcher.
 
 ### Repository layout
 
@@ -41,6 +41,14 @@ Custom config path:
 python launch_gromacs.py my_config.toml
 ```
 
+Recommended operational workflow:
+
+```bash
+python launch_gromacs.py config.toml
+python launch_gromacs.py config.toml --track-progress
+python relaunch_failed_gromacs.py config.toml --confirm
+```
+
 Dry-run mode prints the resolved case combinations and species counts without generating files, calling GROMACS, or submitting Slurm jobs:
 
 ```bash
@@ -51,6 +59,13 @@ Track-progress mode refreshes only the progress tables from the existing case fo
 
 ```bash
 python launch_gromacs.py config.toml --track-progress
+```
+
+Recovery mode is handled by a separate script. It previews the failed or incomplete idle replicas first, and only resubmits them if `--confirm` is present:
+
+```bash
+python relaunch_failed_gromacs.py config.toml
+python relaunch_failed_gromacs.py config.toml --confirm
 ```
 
 ### Runtime environment
@@ -229,10 +244,17 @@ The production job:
 - resumes from an existing checkpoint when the matching `.cpt` file exists
 - otherwise runs `grompp` and starts a fresh production chunk
 - exits immediately if `grompp` fails, leaving the previous logs intact for inspection
+- safely handles the normal "no `.tpr` exists yet" case before the first production `grompp`
 
 ### Skip and resume behavior
 
 The launcher is restart-aware and avoids redoing finished work when possible.
+
+Initial submission mode:
+
+- `launch_gromacs.py` is conservative and only submits replicas that do not already have an existing `rep_<N>` folder with contents
+- if a replica folder already exists, the initial launcher skips it instead of trying to relaunch it
+- failed or incomplete existing replicas should be handled with `relaunch_failed_gromacs.py`
 
 Initial box build:
 
@@ -308,6 +330,15 @@ The rest of the table remains a filesystem snapshot. It reports what has already
 
 If you want to refresh only this table while calculations are already running, use `--track-progress`. That mode is read-only with respect to the simulation workflow: it only observes the current files/logs and rewrites `data/simulation_progress.md` and `data/simulation_progress.csv`.
 
+`relaunch_failed_gromacs.py` is the recovery entry point:
+
+- it never creates new case folders for recovery
+- it only considers already existing replica folders
+- it skips replicas that are currently `queued` or `running`
+- it skips replicas that already reached the production target steps
+- without `--confirm`, it only prints a preview summary of the replicas eligible for recovery
+- with `--confirm`, it resubmits only the failed or incomplete idle replicas
+
 Common stage outputs:
 
 - `1_min/min_out.gro`
@@ -319,13 +350,14 @@ Common stage outputs:
 
 ### Restart guide
 
-The recommended way to resend an interrupted or failed calculation is to rerun the same launcher command with the same config file:
+The recommended way to resend an interrupted or failed calculation is:
 
 ```bash
-python launch_gromacs.py config.toml
+python relaunch_failed_gromacs.py config.toml
+python relaunch_failed_gromacs.py config.toml --confirm
 ```
 
-The launcher decides what to rerun from the files already present in each replica folder.
+The recovery script previews eligible replicas first, then only relaunches failed or incomplete idle replicas already present on disk when `--confirm` is provided.
 
 Scenario 1: minimization, pressurization, and annealing finished, but production `grompp` failed
 
@@ -343,14 +375,14 @@ Scenario 2: minimization and pressurization finished, but annealing `grompp` fai
 
 Scenario 3: minimization, pressurization, and annealing finished, production started, but it did not reach the requested `nsteps`, and there is a checkpoint file
 
-- on relaunch, the launcher detects the checkpoint and treats the production as resumable
+- on relaunch, the recovery script detects the checkpoint and treats the production as resumable
 - the continuation submission uses a new chunk number instead of reusing the interrupted one
 - for example, if `chunk_1.err` belongs to the interrupted attempt, the relaunch submits `chunk_2`
 - the production script resumes with `mdrun -cpi ... -append`, so the trajectory/checkpoint continuation uses the existing production state while keeping a separate Slurm log file for the new attempt
 
 Scenario 4: minimization, pressurization, and annealing finished, production finished one chunk, but a later chunk was interrupted
 
-- on relaunch, the launcher reads the existing `chunk_*.err` history to determine that production has not yet reached the target number of steps
+- on relaunch, the recovery script reads the existing `chunk_*.err` history to determine that production has not yet reached the target number of steps
 - the continuation submission uses the next unused chunk number
 - for example, if `chunk_1` finished and `chunk_2` was interrupted, the relaunch submits `chunk_3`
 - this avoids overwriting `chunk_2.out` or `chunk_2.err` and keeps a complete record of the failed and resumed attempts
@@ -375,6 +407,19 @@ python launch_gromacs.py config.toml --dry-run
 
 ```bash
 python launch_gromacs.py config.toml
+```
+
+6. Refresh the status tables without modifying the workflow:
+
+```bash
+python launch_gromacs.py config.toml --track-progress
+```
+
+7. Preview or confirm recovery of failed/incomplete idle replicas:
+
+```bash
+python relaunch_failed_gromacs.py config.toml
+python relaunch_failed_gromacs.py config.toml --confirm
 ```
 
 ### Important parameters to review

@@ -495,6 +495,140 @@ def rebuild_replica_grompp_log(rep_root):
         )
     return aggregate_path
 
+def build_case_contexts(master_combos, order, group_keys):
+    contexts = []
+    for ratio_entry, temp, ff_entry in master_combos:
+        ratio_name = ratio_entry["name"]
+        component_ratio = ratio_entry["weights"]
+        ff_name = ff_entry["name"]
+        active_itps = ff_entry["species_itps"]
+        label = build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, order, group_keys)
+        sys_path = os.path.abspath(f"data/{label}")
+        contexts.append({
+            "label": label,
+            "sys_path": sys_path,
+            "job_log_path": os.path.join(sys_path, "launch.log"),
+            "ratio_entry": ratio_entry,
+            "temp": temp,
+            "ff_entry": ff_entry,
+            "active_itps": active_itps,
+        })
+    return contexts
+
+def prepare_replica_stage_inputs(rep_root, cfg, order, active_itps, sp, counts, temp, label):
+    for stage in ["1_min", "2_press", "3_anneal", "4_prod"]:
+        dest = os.path.join(rep_root, stage)
+        os.makedirs(dest, exist_ok=True)
+        for f in cfg["project_settings"]["global_ff_files"]:
+            shutil.copy(f"inputs/{f}", f"{dest}/{f}")
+        for k in order:
+            shutil.copy(f"inputs/{active_itps[k]}", f"{dest}/{active_itps[k]}")
+            shutil.copy(f"inputs/{sp[k]['gro']}", f"{dest}/{sp[k]['gro']}")
+
+        with open(os.path.join(dest, "topol.top"), "w") as top:
+            top.write('#include "forcefield.itp"\n')
+            for k in order:
+                top.write(f'#include "{active_itps[k]}"\n')
+            top.write(f"\n[ system ]\n{label}\n\n[ molecules ]\n")
+            for k in order:
+                top.write(f"{sp[k]['resname']:<15} {counts[k]}\n")
+
+        tdir, sim = cfg["project_settings"]["template_dir"], cfg["simulation_settings"]
+        if stage == "1_min":
+            shutil.copy(f"{tdir}/min.mdp", f"{dest}/min.mdp")
+        elif stage == "2_press":
+            modify_mdp(
+                f"{tdir}/press.mdp",
+                f"{dest}/press.mdp",
+                {
+                    "ref_t": sim["press"]["ref_t"],
+                    "nsteps": sim["press"]["nsteps"],
+                    "dt": sim["press"]["dt"],
+                    "ref_p": sim["press"]["ref_p"],
+                },
+            )
+        elif stage == "3_anneal":
+            modify_mdp(
+                f"{tdir}/anneal.mdp",
+                f"{dest}/anneal.mdp",
+                {
+                    "ref_t": temp,
+                    "ref_p": sim["anneal"]["ref_p"],
+                    "nsteps": sim["anneal"]["nsteps"],
+                    "dt": sim["anneal"]["dt"],
+                    "annealing-time": sim["anneal"]["annealing_time"],
+                    "annealing-temp": f"{sim['anneal']['temp_high']} {sim['anneal']['temp_high']} {temp} {temp}",
+                },
+            )
+        elif stage == "4_prod":
+            modify_mdp(
+                f"{tdir}/nvt_run.mdp",
+                f"{dest}/nvt_run.mdp",
+                {
+                    "ref_t": temp,
+                    "nsteps": sim["prod"]["nsteps"],
+                    "dt": sim["prod"]["dt"],
+                },
+            )
+
+def build_initial_box_if_needed(rep_root, label, counts, order, sp, gmx_path, box, job_log, aggregate_log_path, replica_idx):
+    min_dir = os.path.join(rep_root, "1_min")
+    min_start_gro = os.path.join(min_dir, "start.gro")
+    ins_log_abs = os.path.join(min_dir, "insert-molecules.log")
+    curr = None
+    if os.path.exists(min_start_gro):
+        job_log(f"Replica {replica_idx}: found existing 1_min/start.gro at {min_start_gro}; skipping initial box rebuild.")
+        return
+
+    job_log(f"Replica {replica_idx}: building initial box in 1_min (target box={box:.3f} nm).")
+    with open(ins_log_abs, "w") as l:
+        l.write("=== BOX LOG ===\n")
+
+    for k in order:
+        if counts[k] <= 0:
+            with open(ins_log_abs, "a") as l:
+                l.write(f"\n--- Skipping {k} (nmol=0) ---\n")
+            job_log(f"Replica {replica_idx}: skipped species '{k}' during insert-molecules (nmol=0).")
+            continue
+        out = f"tmp_{k}_{replica_idx}.gro"
+        cmd = (
+            f"mpirun -np 1 {gmx_path} insert-molecules "
+            f"{'-box '+str(box)+' '+str(box)+' '+str(box) if curr is None else '-f '+curr} "
+            f"-ci inputs/{sp[k]['gro']} -nmol {counts[k]} -o {out} -seed {replica_idx*123}"
+        )
+        job_log(f"Replica {replica_idx}: insert-molecules for '{k}' (nmol={counts[k]}).")
+        res = subprocess.run(cmd.split(), capture_output=True, text=True)
+        with open(ins_log_abs, "a") as l:
+            l.write(f"\n--- Adding {k} ---\n" + res.stdout + res.stderr)
+        if not os.path.exists(out):
+            print(f"FAILED build for {label}. Check {ins_log_abs}")
+            sys.exit(1)
+        curr = out
+
+    if curr is None:
+        print(f"FAILED build for {label}: no molecules were inserted. Check {ins_log_abs}")
+        job_log(f"Replica {replica_idx}: build failed, no molecules inserted. Check {ins_log_abs}")
+        sys.exit(1)
+
+    shutil.move(curr, min_start_gro)
+    job_log(f"Replica {replica_idx}: built start.gro at {min_start_gro}")
+    append_file_to_aggregate_log(
+        aggregate_log_path,
+        ins_log_abs,
+        f"Replica {replica_idx} | 1_min/insert-molecules.log"
+    )
+    for f in os.listdir("."):
+        if f.startswith("tmp_") and f.endswith(".gro"):
+            os.remove(f)
+
+def replica_has_existing_state(rep_root):
+    if not os.path.exists(rep_root):
+        return False
+    try:
+        return any(True for _ in os.scandir(rep_root))
+    except OSError:
+        return True
+
 def write_setup_sh(path, cfg, abs_rep_path, aggregate_log_path):
     p, s = cfg["project_settings"], cfg["slurm_settings"]
     module_block = "\n".join(p.get("gmx_modules", []))
@@ -645,9 +779,11 @@ TPR_FILE=""
 if [ -f "nvt_run.tpr" ]; then
     TPR_FILE="nvt_run.tpr"
 else
-    FIRST_TPR=$(ls -1 *.tpr 2>/dev/null | head -n 1)
-    if [ -n "$FIRST_TPR" ]; then
-        TPR_FILE="$FIRST_TPR"
+    shopt -s nullglob
+    TPR_CANDIDATES=( *.tpr )
+    shopt -u nullglob
+    if [ "${{#TPR_CANDIDATES[@]}}" -gt 0 ]; then
+        TPR_FILE="${{TPR_CANDIDATES[0]}}"
     fi
 fi
 
@@ -1122,19 +1258,7 @@ def main():
 
     print(f"Setting {len(master_combos)} total variations...")
 
-    case_contexts = []
-    for ratio_entry, temp, ff_entry in master_combos:
-        ratio_name = ratio_entry["name"]
-        component_ratio = ratio_entry["weights"]
-        ff_name = ff_entry["name"]
-        active_itps = ff_entry["species_itps"]
-        label = build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, order, group_keys)
-        sys_path = os.path.abspath(f"data/{label}")
-        case_contexts.append({
-            "label": label,
-            "sys_path": sys_path,
-            "job_log_path": os.path.join(sys_path, "launch.log"),
-        })
+    case_contexts = build_case_contexts(master_combos, order, group_keys)
 
     if args.track_progress:
         progress_rows = collect_progress_snapshot(case_contexts, cfg)
@@ -1155,21 +1279,22 @@ def main():
     progress_row_refs = []
     slurm_job_ids = []
 
-    for ratio_entry, temp, ff_entry in master_combos:
+    for ctx in case_contexts:
+        ratio_entry = ctx["ratio_entry"]
+        temp = ctx["temp"]
+        ff_entry = ctx["ff_entry"]
+        active_itps = ctx["active_itps"]
         ratio_name = ratio_entry["name"]
-        component_ratio = ratio_entry["weights"]
         ff_name = ff_entry["name"]
-        active_itps = ff_entry["species_itps"]
-
-        label = build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, order, group_keys)
-        sys_path = os.path.abspath(f"data/{label}")
+        label = ctx["label"]
+        sys_path = ctx["sys_path"]
         job_log, job_log_path = make_job_logger(sys_path, label)
         job_log(f"Case details: ratio={ratio_name}, ff={ff_name}, temp={fmt_num(temp)} K")
         job_log(f"Log file path: {job_log_path}")
         
         counts, sizing_info = resolve_system_size(
             cfg, sp, order, group_defs, group_keys,
-            component_ratio
+            ratio_entry["weights"]
         )
         job_log(
             "Resolved system size: "
@@ -1188,86 +1313,54 @@ def main():
                 slurm_job_ids.append(job_ids["setup_job_id"])
             if job_ids["prod_job_id"]:
                 slurm_job_ids.append(job_ids["prod_job_id"])
-        for ctx in case_contexts:
-            if ctx["label"] == label:
-                ctx["job_log_path"] = job_log_path
-                break
+        ctx["job_log_path"] = job_log_path
 
         if args.dry_run:
             job_log("Dry-run enabled. No file generation, no GROMACS, no Slurm submission.")
-            print_dry_run_case(label, temp, ratio_name, ff_name, counts, order, group_keys, component_ratio, active_itps, sizing_info)
+            print_dry_run_case(
+                label,
+                temp,
+                ratio_name,
+                ff_name,
+                counts,
+                order,
+                group_keys,
+                ratio_entry["weights"],
+                active_itps,
+                sizing_info,
+            )
             continue
 
         for r in range(1, cfg['project_settings']['num_replicas'] + 1):
             rep_root = os.path.join(sys_path, f"rep_{r}")
+            if replica_has_existing_state(rep_root):
+                msg = (
+                    f"Replica {r}: existing replica folder detected at {rep_root}. "
+                    "Initial-launch mode will not modify or resubmit existing replicas."
+                )
+                print(f"{label} R{r}: existing replica detected. Skipping initial submission.")
+                job_log(msg)
+                progress_row_refs.append((label, r, rep_root))
+                continue
             grompp_log_path = rebuild_replica_grompp_log(rep_root)
             job_log("-" * 70)
             job_log(f"Replica {r}")
             job_log("-" * 70)
             job_log(f"Replica {r}: preparing stage folders and topology/MDP inputs in {rep_root}")
             job_log(f"Replica {r}: aggregated grompp log path: {grompp_log_path}")
-            for stage in ["1_min", "2_press", "3_anneal", "4_prod"]:
-                dest = os.path.join(rep_root, stage); os.makedirs(dest, exist_ok=True)
-                for f in cfg["project_settings"]["global_ff_files"]: shutil.copy(f"inputs/{f}", f"{dest}/{f}")
-                for k in order:
-                    shutil.copy(f"inputs/{active_itps[k]}", f"{dest}/{active_itps[k]}")
-                    shutil.copy(f"inputs/{sp[k]['gro']}", f"{dest}/{sp[k]['gro']}")
-	    	    
-                with open(os.path.join(dest, "topol.top"), "w") as top:
-                    top.write('#include "forcefield.itp"\n')
-                    for k in order: top.write(f'#include "{active_itps[k]}"\n')
-                    top.write(f"\n[ system ]\n{label}\n\n[ molecules ]\n")
-                    for k in order: top.write(f"{sp[k]['resname']:<15} {counts[k]}\n")
-	    	
-                tdir, sim = cfg["project_settings"]["template_dir"], cfg["simulation_settings"]
-                if stage == "1_min": shutil.copy(f"{tdir}/min.mdp", f"{dest}/min.mdp")
-                elif stage == "2_press":
-                    modify_mdp(f"{tdir}/press.mdp", f"{dest}/press.mdp", {"ref_t": sim["press"]["ref_t"], "nsteps": sim["press"]["nsteps"], "dt": sim["press"]["dt"], "ref_p": sim["press"]["ref_p"]})
-                elif stage == "3_anneal":
-                    modify_mdp(f"{tdir}/anneal.mdp", f"{dest}/anneal.mdp", {
-                        "ref_t": temp, "ref_p": sim["anneal"]["ref_p"], "nsteps": sim["anneal"]["nsteps"], "dt": sim["anneal"]["dt"],
-                        "annealing-time": sim["anneal"]["annealing_time"], "annealing-temp": f"{sim['anneal']['temp_high']} {sim['anneal']['temp_high']} {temp} {temp}"
-                    })
-                elif stage == "4_prod":
-                    modify_mdp(f"{tdir}/nvt_run.mdp", f"{dest}/nvt_run.mdp", {"ref_t": temp, "nsteps": sim["prod"]["nsteps"], "dt": sim["prod"]["dt"]})
-	    	
-            # --- BUILD BOX ---
-            min_dir = os.path.join(rep_root, "1_min")
-            min_start_gro = os.path.join(min_dir, "start.gro")
-            ins_log_abs = os.path.join(min_dir, "insert-molecules.log")
-            curr, box = None, sizing_info["box_size_nm"]
-            if os.path.exists(min_start_gro):
-                job_log(f"Replica {r}: found existing 1_min/start.gro at {min_start_gro}; skipping initial box rebuild.")
-            else:
-                job_log(f"Replica {r}: building initial box in 1_min (target box={box:.3f} nm).")
-                with open(ins_log_abs, "w") as l: l.write("=== BOX LOG ===\n")
-
-                for k in order:
-                    if counts[k] <= 0:
-                        with open(ins_log_abs, "a") as l: l.write(f"\n--- Skipping {k} (nmol=0) ---\n")
-                        job_log(f"Replica {r}: skipped species '{k}' during insert-molecules (nmol=0).")
-                        continue
-                    out = f"tmp_{k}_{r}.gro"
-                    cmd = f"mpirun -np 1 {gmx_path} insert-molecules {'-box '+str(box)+' '+str(box)+' '+str(box) if curr is None else '-f '+curr} -ci inputs/{sp[k]['gro']} -nmol {counts[k]} -o {out} -seed {r*123}"
-                    job_log(f"Replica {r}: insert-molecules for '{k}' (nmol={counts[k]}).")
-                    res = subprocess.run(cmd.split(), capture_output=True, text=True)
-                    with open(ins_log_abs, "a") as l: l.write(f"\n--- Adding {k} ---\n" + res.stdout + res.stderr)
-                    if not os.path.exists(out): print(f"FAILED build for {label}. Check {ins_log_abs}"); sys.exit(1)
-                    curr = out
-
-                if curr is None:
-                    print(f"FAILED build for {label}: no molecules were inserted. Check {ins_log_abs}")
-                    job_log(f"Replica {r}: build failed, no molecules inserted. Check {ins_log_abs}")
-                    sys.exit(1)
-                shutil.move(curr, min_start_gro)
-                job_log(f"Replica {r}: built start.gro at {min_start_gro}")
-                append_file_to_aggregate_log(
-                    grompp_log_path,
-                    ins_log_abs,
-                    f"Replica {r} | 1_min/insert-molecules.log"
-                )
-                for f in os.listdir("."): 
-                    if f.startswith("tmp_") and f.endswith(".gro"): os.remove(f)
+            prepare_replica_stage_inputs(rep_root, cfg, order, active_itps, sp, counts, temp, label)
+            build_initial_box_if_needed(
+                rep_root,
+                label,
+                counts,
+                order,
+                sp,
+                gmx_path,
+                sizing_info["box_size_nm"],
+                job_log,
+                grompp_log_path,
+                r,
+            )
 
             # --- PRE-SUBMISSION CHECKS ---
             prod_dir = os.path.join(rep_root, "4_prod")
