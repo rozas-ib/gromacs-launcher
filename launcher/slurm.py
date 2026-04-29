@@ -4,22 +4,86 @@ import shutil
 import subprocess
 
 
+def shell_join(parts):
+    return " ".join(str(part) for part in parts if str(part).strip())
+
+
+def get_slurm_step_launcher(slurm_cfg, stage, step_name):
+    stage_key = f"{step_name}_launcher_{stage}"
+    if stage_key in slurm_cfg:
+        return str(slurm_cfg.get(stage_key, "")).strip()
+    shared_key = f"{step_name}_launcher"
+    if shared_key in slurm_cfg:
+        return str(slurm_cfg.get(shared_key, "")).strip()
+    if step_name == "grompp":
+        return "srun -n 1"
+    if step_name == "mdrun":
+        ntasks = slurm_cfg.get(f"mdrun_ntasks_{stage}")
+        if ntasks:
+            return f"srun -n {ntasks}"
+        return "srun -n 1"
+    return "srun -n 1"
+
+
+def get_mdrun_extra_args(slurm_cfg, stage):
+    stage_key = f"mdrun_args_{stage}"
+    if stage_key in slurm_cfg:
+        return str(slurm_cfg.get(stage_key, "")).strip()
+    if "mdrun_args" in slurm_cfg:
+        return str(slurm_cfg.get("mdrun_args", "")).strip()
+    return ""
+
+
+def build_sbatch_directives(slurm_cfg, stage, job_name, output_path, error_path):
+    directives = [
+        f"#SBATCH --job-name={job_name}",
+        f"#SBATCH --account={slurm_cfg['account']}",
+        f"#SBATCH --partition={slurm_cfg[f'partition_{stage}']}",
+    ]
+
+    qos = slurm_cfg.get(f"qos_{stage}")
+    if qos:
+        directives.append(f"#SBATCH --qos={qos}")
+
+    mem = slurm_cfg.get(f"mem_{stage}")
+    if mem:
+        directives.append(f"#SBATCH --mem={mem}")
+
+    directives.extend(
+        [
+            f"#SBATCH --time={slurm_cfg[f'time_{stage}']}",
+            f"#SBATCH --nodes={slurm_cfg.get(f'nodes_{stage}', 1)}",
+            f"#SBATCH --cpus-per-task={slurm_cfg.get(f'cpus_per_task_{stage}', 2)}",
+            f"#SBATCH --output={output_path}",
+            f"#SBATCH --error={error_path}",
+        ]
+    )
+
+    ntasks = slurm_cfg.get(f"ntasks_{stage}")
+    if ntasks:
+        directives.insert(-3, f"#SBATCH --ntasks={ntasks}")
+    else:
+        directives.insert(-3, f"#SBATCH --ntasks-per-node={slurm_cfg.get(f'ntasks_per_node_{stage}', 56)}")
+    return "\n".join(directives)
+
+
 def write_setup_sh(path, cfg, abs_rep_path, aggregate_log_path):
     project_cfg, slurm_cfg = cfg["project_settings"], cfg["slurm_settings"]
     module_block = "\n".join(project_cfg.get("gmx_modules", []))
     analysis_script = os.path.join(os.getcwd(), project_cfg["scripts_dir"], project_cfg["density_analysis_script"])
+    grompp_launcher = get_slurm_step_launcher(slurm_cfg, "setup", "grompp")
+    mdrun_launcher = get_slurm_step_launcher(slurm_cfg, "setup", "mdrun")
+    mdrun_extra_args = get_mdrun_extra_args(slurm_cfg, "setup")
+    sbatch_block = build_sbatch_directives(
+        slurm_cfg,
+        "setup",
+        f"S_{project_cfg['system_name']}",
+        f"{abs_rep_path}/setup.out",
+        f"{abs_rep_path}/setup.err",
+    )
 
     script_content = f"""#!/bin/bash
-#SBATCH --job-name=S_{project_cfg['system_name']}
-#SBATCH --account={slurm_cfg['account']}
-#SBATCH --partition={slurm_cfg['partition_setup']}
-#SBATCH --qos={slurm_cfg['qos_setup']}
-#SBATCH --time={slurm_cfg['time_setup']}
-#SBATCH --nodes={slurm_cfg.get('nodes_setup', 1)}
-#SBATCH --ntasks-per-node={slurm_cfg.get('ntasks_per_node_setup', 56)}
-#SBATCH --cpus-per-task={slurm_cfg.get('cpus_per_task_setup', 2)}
-#SBATCH --output={abs_rep_path}/setup.out
-#SBATCH --error={abs_rep_path}/setup.err
+{sbatch_block}
 
 set -euo pipefail
 
@@ -50,39 +114,39 @@ append_stage_log() {{
 
 cd $BASE/1_min
 if [ ! -f "min_out.gro" ]; then
-    if ! srun -n 1 $GMX grompp -f min.mdp -c start.gro -p topol.top -o min.tpr > $BASE/1_min/grompp_min.log 2>&1; then
+    if ! {shell_join([grompp_launcher, "$GMX", "grompp -f min.mdp -c start.gro -p topol.top -o min.tpr"])} > $BASE/1_min/grompp_min.log 2>&1; then
         append_stage_log "Replica $(basename "$BASE") | 1_min/grompp_min.log" "$BASE/1_min/grompp_min.log"
         echo "ERROR: grompp failed for minimization. See $BASE/1_min/grompp_min.log"
         exit 1
     fi
     append_stage_log "Replica $(basename "$BASE") | 1_min/grompp_min.log" "$BASE/1_min/grompp_min.log"
-    srun $GMX mdrun -deffnm min -c min_out.gro
+    {shell_join([mdrun_launcher, "$GMX", "mdrun -deffnm min -c min_out.gro", mdrun_extra_args])}
 else
     echo "Minimization already completed. Skipping."
 fi
 
 cd $BASE/2_press
 if [ ! -f "press_out.gro" ]; then
-    if ! srun -n 1 $GMX grompp -f press.mdp -c ../1_min/min_out.gro -p topol.top -o press.tpr > $BASE/2_press/grompp_press.log 2>&1; then
+    if ! {shell_join([grompp_launcher, "$GMX", "grompp -f press.mdp -c ../1_min/min_out.gro -p topol.top -o press.tpr"])} > $BASE/2_press/grompp_press.log 2>&1; then
         append_stage_log "Replica $(basename "$BASE") | 2_press/grompp_press.log" "$BASE/2_press/grompp_press.log"
         echo "ERROR: grompp failed for pressure equilibration. See $BASE/2_press/grompp_press.log"
         exit 1
     fi
     append_stage_log "Replica $(basename "$BASE") | 2_press/grompp_press.log" "$BASE/2_press/grompp_press.log"
-    srun $GMX mdrun -deffnm press -c press_out.gro -rdd 1.2 -pin on
+    {shell_join([mdrun_launcher, "$GMX", "mdrun -deffnm press -c press_out.gro -rdd 1.2 -pin on", mdrun_extra_args])}
 else
     echo "Pressure equilibration already completed. Skipping."
 fi
 
 cd $BASE/3_anneal
 if [ ! -f "anneal_out.gro" ]; then
-    if ! srun -n 1 $GMX grompp -f anneal.mdp -c ../2_press/press_out.gro -p topol.top -o anneal.tpr > $BASE/3_anneal/grompp_anneal.log 2>&1; then
+    if ! {shell_join([grompp_launcher, "$GMX", "grompp -f anneal.mdp -c ../2_press/press_out.gro -p topol.top -o anneal.tpr"])} > $BASE/3_anneal/grompp_anneal.log 2>&1; then
         append_stage_log "Replica $(basename "$BASE") | 3_anneal/grompp_anneal.log" "$BASE/3_anneal/grompp_anneal.log"
         echo "ERROR: grompp failed for annealing. See $BASE/3_anneal/grompp_anneal.log"
         exit 1
     fi
     append_stage_log "Replica $(basename "$BASE") | 3_anneal/grompp_anneal.log" "$BASE/3_anneal/grompp_anneal.log"
-    srun $GMX mdrun -deffnm anneal -c anneal_out.gro -pin on
+    {shell_join([mdrun_launcher, "$GMX", "mdrun -deffnm anneal -c anneal_out.gro -pin on", mdrun_extra_args])}
 else
     echo "Annealing already completed. Skipping."
 fi
@@ -108,17 +172,18 @@ def write_prod_sh(path, cfg, abs_rep_path, chunk_idx, aggregate_log_path):
     project_cfg, slurm_cfg = cfg["project_settings"], cfg["slurm_settings"]
     module_block = "\n".join(project_cfg.get("gmx_modules", []))
     prod_path = os.path.join(abs_rep_path, "4_prod")
+    grompp_launcher = get_slurm_step_launcher(slurm_cfg, "prod", "grompp")
+    mdrun_launcher = get_slurm_step_launcher(slurm_cfg, "prod", "mdrun")
+    mdrun_extra_args = get_mdrun_extra_args(slurm_cfg, "prod")
+    sbatch_block = build_sbatch_directives(
+        slurm_cfg,
+        "prod",
+        f"P{chunk_idx}_{project_cfg['system_name']}",
+        f"{prod_path}/chunk_{chunk_idx}.out",
+        f"{prod_path}/chunk_{chunk_idx}.err",
+    )
     script_content = f"""#!/bin/bash
-#SBATCH --job-name=P{chunk_idx}_{project_cfg['system_name']}
-#SBATCH --account={slurm_cfg['account']}
-#SBATCH --partition={slurm_cfg['partition_prod']}
-#SBATCH --qos={slurm_cfg['qos_prod']}
-#SBATCH --time={slurm_cfg['time_prod']}
-#SBATCH --nodes={slurm_cfg.get('nodes_prod', 1)}
-#SBATCH --ntasks-per-node={slurm_cfg.get('ntasks_per_node_prod', 56)}
-#SBATCH --cpus-per-task={slurm_cfg.get('cpus_per_task_prod', 2)}
-#SBATCH --output={prod_path}/chunk_{chunk_idx}.out
-#SBATCH --error={prod_path}/chunk_{chunk_idx}.err
+{sbatch_block}
 
 set -euo pipefail
 
@@ -171,18 +236,18 @@ if [ -f "$CPT_FILE" ]; then
         echo "ERROR: $CPT_FILE exists but no matching .tpr file was found. Cannot restart production."
         exit 1
     fi
-    srun $GMX mdrun -v -deffnm "$DEFFNM" -s "$TPR_FILE" -cpi "$CPT_FILE" -append -maxh 71.7 -pin on
+    {shell_join([mdrun_launcher, "$GMX", 'mdrun -v -deffnm "$DEFFNM" -s "$TPR_FILE" -cpi "$CPT_FILE" -append -maxh 71.7 -pin on', mdrun_extra_args])}
 else
     if [ -n "$TPR_FILE" ]; then
-        srun $GMX mdrun -v -deffnm "$DEFFNM" -s "$TPR_FILE" -maxh 71.7 -pin on
+        {shell_join([mdrun_launcher, "$GMX", 'mdrun -v -deffnm "$DEFFNM" -s "$TPR_FILE" -maxh 71.7 -pin on', mdrun_extra_args])}
     else
-        if ! srun -n 1 $GMX grompp -f nvt_run.mdp -c start.gro -p topol.top -o nvt_run.tpr > {prod_path}/grompp_prod.log 2>&1; then
+        if ! {shell_join([grompp_launcher, "$GMX", "grompp -f nvt_run.mdp -c start.gro -p topol.top -o nvt_run.tpr"])} > {prod_path}/grompp_prod.log 2>&1; then
             append_stage_log "Replica $(basename "$(dirname "$PWD")") | 4_prod/grompp_prod.log" "{prod_path}/grompp_prod.log"
             echo "ERROR: grompp failed for production. See {prod_path}/grompp_prod.log"
             exit 1
         fi
         append_stage_log "Replica $(basename "$(dirname "$PWD")") | 4_prod/grompp_prod.log" "{prod_path}/grompp_prod.log"
-        srun $GMX mdrun -v -deffnm nvt_run -s nvt_run.tpr -maxh 71.7 -pin on
+        {shell_join([mdrun_launcher, "$GMX", "mdrun -v -deffnm nvt_run -s nvt_run.tpr -maxh 71.7 -pin on", mdrun_extra_args])}
     fi
 fi
 """
@@ -314,4 +379,3 @@ def submit_sbatch(script_path, dependency_job_id=None):
             f"sbatch returned no job id for '{script_path}'. stderr: {stderr or '[empty]'}"
         )
     return stdout
-

@@ -88,22 +88,29 @@ TOL_solv = 2.0
 name = "ff_set1"
 cation = "li.itp"
 anion = "fsi.itp"
-solvent_1 = "dme_qforce_cm5_1.itp"
-solvent_2 = "tol_qforce_cm5_1.itp"
+solvent_1 = "dme_cm5_1.itp"
+solvent_2 = "tol_cm5_1.itp"
 
 [[screening.force_field]]
 name = "ff_set2"
 cation = "li.itp"
 anion = "fsi.itp"
-solvent_1 = "dme_qforce_cm5_09.itp"
-solvent_2 = "tol_qforce_cm5_09.itp"
+solvent_1 = "dme_cm5_09.itp"
+solvent_2 = "tol_cm5_09.itp"
 
 [slurm_settings]
 account = "cice86"
 partition_setup = "gpp"
 partition_prod = "gpp"
-qos_setup = "gp_debug"
+# Set qos_* only on clusters that require it.
+qos_setup = "gp_resa"
 qos_prod = "gp_resa"
+# Set mem_* only on clusters that require explicit memory requests, for example "64G".
+# mem_setup = "64G"
+# mem_prod = "128G"
+# You can request either total tasks or tasks per node depending on the cluster policy.
+# ntasks_setup = 4
+# ntasks_prod = 32
 time_setup = "02:00:00"
 time_prod = "72:00:00"
 nodes_setup = 1
@@ -112,6 +119,13 @@ cpus_per_task_setup = 2
 nodes_prod = 1
 ntasks_per_node_prod = 56
 cpus_per_task_prod = 2
+# Launchers used inside the Slurm allocation. Defaults are safe for serial steps.
+# grompp_launcher = "srun -n 1"
+# Set a launcher to "" to run the command directly without srun.
+# mdrun_launcher_setup = "srun -n 1"
+# mdrun_launcher_prod = "srun -n 32"
+# Optional extra mdrun flags, for example:
+# mdrun_args_prod = "-ntmpi 32 -ntomp 1 -npme 8 -dd 4 3 2"
 
 [[species]]
 # Species names are arbitrary. Group stoichiometric_ratio references these names.
@@ -155,6 +169,18 @@ ref_t = 10.0
 nsteps = 150000
 dt = 0.002
 
+[simulation_settings.conc_opt_press]
+ref_p = 10.0
+ref_t = 298.15
+nsteps = 150000
+dt = 0.002
+
+[simulation_settings.conc_opt_npt]
+ref_p = 1.0
+ref_t = 298.15
+nsteps = 1000000
+dt = 0.002
+
 [simulation_settings.anneal]
 ref_p = 1.0
 temp_high = 500.0
@@ -165,6 +191,28 @@ dt = 0.002
 [simulation_settings.prod]
 nsteps = 500000
 dt = 0.002
+
+[concentration_optimizer]
+enabled = false
+target_group = "LiFSI_salt"
+target_molarity_mol_l = 1.0
+tolerance_mol_l = 0.05
+max_iterations = 5
+reference_count = 150
+initial_ratio_name = "ratio_1"
+force_field_name = "ff_set1"
+temperature = 298.15
+output_subdir = "concentration_optimizer"
+density_average_fraction = 0.2
+max_weight_change_factor = 3.0
+initial_density_guess_kg_m3 = 1000.0
+density_analysis_tolerance = 0.01
+density_analysis_show_points = 20
+density_analysis_window_size = 10
+density_analysis_mean_threshold = 0.1
+density_analysis_distance = 1
+density_analysis_min_consecutive_points = 1
+density_analysis_time_crop = ""
 """
 
 
@@ -181,4 +229,3 @@ def load_config(config_path):
         create_default_config(config_path)
     with open(config_path, "rb") as f:
         return tomllib.load(f)
-

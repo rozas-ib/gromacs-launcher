@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -232,6 +233,26 @@ def main(args):
             # We use a trick here: setting an environment variable just for this command
             # to prevent MPI from trying to initialize complex networking
             os.system(f"export I_MPI_SHM_LMT=shm; {command}")
+
+        if args.metadata_output:
+            metadata = {
+                "average_density": float(average_density),
+                "stationary_start_time": float(df['Time'].loc[stationary_start]),
+                "tolerance": float(args.tolerance),
+                "selected_points": [
+                    {
+                        "index": int(idx),
+                        "time": float(row["Time"]),
+                        "density": float(row["Density"]),
+                        "delta_to_average": float(row["Delta to Average"]),
+                        "output_file": os.path.join(file_dir, f"start_replica_{rank+1}.gro"),
+                    }
+                    for rank, (idx, row) in enumerate(points_to_extract.iterrows())
+                ],
+            }
+            with open(args.metadata_output, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2)
+                f.write("\n")
         
         # Plotting
         all_lengths = count_consecutive_series(df, args.window_size, args.min_consecutive_points, args.distance)
@@ -252,5 +273,6 @@ if __name__ == "__main__":
     parser.add_argument('--min_consecutive_points', type=int, default=1, help='Min consecutive points for convergence.')
     parser.add_argument('--time_crop', type=parse_range, help="Format 'start:end'.")
     parser.add_argument('--index_crop', type=parse_index_range, help="Format 'start:end'.")
+    parser.add_argument('--metadata-output', type=str, help='Optional JSON file with average-density frame selection results.')
     args = parser.parse_args()
     main(args)

@@ -61,10 +61,13 @@ python launch_gromacs.py my_config.toml
 Recommended operational workflow:
 
 ```bash
+python optimize_concentration.py config.toml
 python launch_gromacs.py config.toml
 python launch_gromacs.py config.toml --track-progress
 python relaunch_failed_gromacs.py config.toml --confirm
 ```
+
+If you want to match a target molar concentration before launching the full screened production workflow, run the optional pre-launch concentration optimizer first. It performs an iterative `min -> press -> npt` workflow in a separate working tree under `output_root/<concentration_optimizer.output_subdir>/...` and keeps the normal `launch_gromacs.py` case folders untouched.
 
 If you want a simulation campaign to be written somewhere other than `data/`, set:
 
@@ -103,6 +106,19 @@ python relaunch_failed_gromacs.py config.toml
 python relaunch_failed_gromacs.py config.toml --confirm
 ```
 
+The concentration optimizer is handled by a dedicated script:
+
+```bash
+python optimize_concentration.py config.toml
+```
+
+Each execution advances the workflow by at most one new iteration:
+
+- if no iteration exists yet, it prepares and submits `iter_1`
+- if the latest iteration is still running, it reports the current status and exits
+- if the latest iteration completed but missed the target molarity, it computes the next guess and submits the next iteration
+- if the target molarity is reached within tolerance, it writes the optimized ratio summary and prints a ready-to-copy `[[screening.component_ratios]]` snippet
+
 ### Runtime environment
 
 The launcher itself needs Python 3.11+ for `tomllib`, or Python < 3.11 with `tomli` installed.
@@ -137,7 +153,7 @@ The submitted setup job script loads the runtime environment from the config:
 - `project_settings.conda_env`: Conda environment activated in the setup job
 - `project_settings.gmx_executable_path`: absolute path to `gmx_mpi`; if it is missing or invalid during launcher execution, the script falls back to `gmx_mpi` from `PATH`
 
-The generated Slurm scripts place all `#SBATCH` directives immediately after the shebang so scheduler options such as `--account`, partitions, and QoS are parsed correctly before the shell body starts.
+The generated Slurm scripts place all `#SBATCH` directives immediately after the shebang so scheduler options such as `--account`, partitions, optional QoS, and optional memory requests are parsed correctly before the shell body starts.
 
 There is no hardcoded `source ~/load_gmx24.sh` workflow in the launcher. Any module-loading commands should be declared in `project_settings.gmx_modules`.
 
@@ -150,10 +166,66 @@ The generated template shows the full schema. The main sections are:
 - `[project_settings].topology_forcefield_include`: filename written as the first `#include` in `topol.top`; defaults to `forcefield.itp`
 - `[system_sizing]`: rules for turning formulation ratios into molecule counts
 - `[screening]`: temperatures, component-ratio screening, and force-field screening
-- `[slurm_settings]`: Slurm account, partitions, QoS, walltimes, and CPU layout
+- `[slurm_settings]`: Slurm account, partitions, optional QoS, optional memory requests, walltimes, CPU layout, and optionally `ntasks_*` instead of `ntasks_per_node_*`, plus custom `grompp_launcher`, `mdrun_launcher_*`, and `mdrun_args_*` strings when a cluster needs a specific `srun` or `gmx mdrun` layout
 - `[[species]]`: species definitions using a `name` and a `.gro` file
 - `[groups.*]`: top-level formulation groups with stoichiometric ratios over species
 - `[simulation_settings.press]`, `[simulation_settings.anneal]`, `[simulation_settings.prod]`: stage-specific MDP replacements
+- `[simulation_settings.conc_opt_press]`, `[simulation_settings.conc_opt_npt]`: MDP replacements used only by the optional concentration optimizer
+- `[concentration_optimizer]`: target molarity, tolerance, selected reference ratio/temperature/force-field, and iterative optimization settings
+
+### Concentration optimizer
+
+The optional concentration optimizer is useful when you know the target molarity you want, but you do not yet know which input group weights will produce that molarity after density relaxation.
+
+It works on one selected case definition at a time:
+
+- one `[[screening.component_ratios]]` entry chosen by `concentration_optimizer.initial_ratio_name`
+- one `[[screening.force_field]]` entry chosen by `concentration_optimizer.force_field_name`
+- one temperature chosen by `concentration_optimizer.temperature`
+- one top-level formulation group chosen by `concentration_optimizer.target_group`
+
+The optimizer keeps the non-target group weights fixed relative to the selected starting ratio, adjusts only the target-group weight between iterations, and after each finished `min -> press -> npt` iteration it:
+
+1. reads the final `npt_out.gro` box volume
+2. reads the NPT density from `npt.edr` when available
+3. computes the achieved molarity of the target group
+4. compares it against `concentration_optimizer.target_molarity_mol_l`
+5. either stops if the result is inside `concentration_optimizer.tolerance_mol_l`, or prepares the next guess
+
+Suggested config block:
+
+```toml
+[concentration_optimizer]
+enabled = true
+target_group = "LiFSI_salt"
+target_molarity_mol_l = 1.0
+tolerance_mol_l = 0.05
+max_iterations = 5
+initial_ratio_name = "ratio_1"
+force_field_name = "ff_set1"
+temperature = 298.15
+output_subdir = "concentration_optimizer"
+density_average_fraction = 0.2
+max_weight_change_factor = 3.0
+```
+
+The optimizer uses the existing `min.mdp` plus two dedicated config-driven sections for the pre-launch relaxation workflow:
+
+```toml
+[simulation_settings.conc_opt_press]
+ref_p = 10.0
+ref_t = 298.15
+nsteps = 150000
+dt = 0.002
+
+[simulation_settings.conc_opt_npt]
+ref_p = 1.0
+ref_t = 298.15
+nsteps = 1000000
+dt = 0.002
+```
+
+The NPT stage is written from `mdp_templates/npt.mdp`, so that template must be present in `mdp_templates/`.
 
 ### Species and groups
 
