@@ -152,6 +152,8 @@ The submitted setup job script loads the runtime environment from the config:
 - `project_settings.gmx_modules`: shell lines inserted near the top of the Slurm job script, typically `module load ...`
 - `project_settings.conda_env`: Conda environment activated in the setup job
 - `project_settings.gmx_executable_path`: absolute path to `gmx_mpi`; if it is missing or invalid during launcher execution, the script falls back to `gmx_mpi` from `PATH`
+- `slurm_settings.grompp_launcher`, `slurm_settings.mdrun_launcher_*`: optional launch commands for restricted clusters that require `srun`, or permissive clusters where direct `gmx mdrun` is preferred
+- `slurm_settings.omp_num_threads_*`: optional per-stage OpenMP thread counts; defaults to `SLURM_CPUS_PER_TASK`
 
 The generated Slurm scripts place all `#SBATCH` directives immediately after the shebang so scheduler options such as `--account`, partitions, optional QoS, and optional memory requests are parsed correctly before the shell body starts.
 

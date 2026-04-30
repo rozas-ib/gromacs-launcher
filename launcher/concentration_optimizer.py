@@ -22,6 +22,7 @@ from .config import load_config
 from .mdp import modify_mdp
 from .paths import get_output_root
 from .slurm import (
+    build_runtime_exports,
     build_sbatch_directives,
     collect_slurm_status_map,
     get_mdrun_extra_args,
@@ -559,6 +560,7 @@ def write_optimizer_iteration_sh(iter_root, cfg, aggregate_log_path, config_path
     grompp_launcher = get_slurm_step_launcher(slurm_cfg, "setup", "grompp")
     mdrun_launcher = get_slurm_step_launcher(slurm_cfg, "setup", "mdrun")
     mdrun_extra_args = get_mdrun_extra_args(slurm_cfg, "setup")
+    runtime_exports = build_runtime_exports(slurm_cfg, "setup", [grompp_launcher, mdrun_launcher])
     sbatch_block = build_sbatch_directives(
         slurm_cfg,
         "setup",
@@ -574,8 +576,7 @@ set -euo pipefail
 {module_block}
 source ~/miniconda3/bin/activate {project_cfg['conda_env']}
 
-export SRUN_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+{runtime_exports}
 
 BASE="{iter_root}"
 GMX="{project_cfg.get('gmx_executable_path', 'gmx_mpi')}"

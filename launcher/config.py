@@ -124,6 +124,10 @@ cpus_per_task_prod = 2
 # Set a launcher to "" to run the command directly without srun.
 # mdrun_launcher_setup = "srun -n 1"
 # mdrun_launcher_prod = "srun -n 32"
+# Control runtime threading/binding separately from the SBATCH allocation when needed.
+# omp_num_threads_setup = "$SLURM_CPUS_PER_TASK"
+# omp_num_threads_prod = "1"
+# srun_cpus_per_task_prod = "1"
 # Optional extra mdrun flags, for example:
 # mdrun_args_prod = "-ntmpi 32 -ntomp 1 -npme 8 -dd 4 3 2"
 

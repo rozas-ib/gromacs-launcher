@@ -8,17 +8,23 @@ def shell_join(parts):
     return " ".join(str(part) for part in parts if str(part).strip())
 
 
-def get_slurm_step_launcher(slurm_cfg, stage, step_name):
-    stage_key = f"{step_name}_launcher_{stage}"
+def get_stage_setting(slurm_cfg, stage, key, default=None):
+    stage_key = f"{key}_{stage}"
     if stage_key in slurm_cfg:
-        return str(slurm_cfg.get(stage_key, "")).strip()
-    shared_key = f"{step_name}_launcher"
-    if shared_key in slurm_cfg:
-        return str(slurm_cfg.get(shared_key, "")).strip()
+        return slurm_cfg.get(stage_key)
+    if key in slurm_cfg:
+        return slurm_cfg.get(key)
+    return default
+
+
+def get_slurm_step_launcher(slurm_cfg, stage, step_name):
+    launcher = get_stage_setting(slurm_cfg, stage, f"{step_name}_launcher")
+    if launcher is not None:
+        return str(launcher).strip()
     if step_name == "grompp":
         return "srun -n 1"
     if step_name == "mdrun":
-        ntasks = slurm_cfg.get(f"mdrun_ntasks_{stage}")
+        ntasks = get_stage_setting(slurm_cfg, stage, "mdrun_ntasks")
         if ntasks:
             return f"srun -n {ntasks}"
         return "srun -n 1"
@@ -26,12 +32,27 @@ def get_slurm_step_launcher(slurm_cfg, stage, step_name):
 
 
 def get_mdrun_extra_args(slurm_cfg, stage):
-    stage_key = f"mdrun_args_{stage}"
-    if stage_key in slurm_cfg:
-        return str(slurm_cfg.get(stage_key, "")).strip()
-    if "mdrun_args" in slurm_cfg:
-        return str(slurm_cfg.get("mdrun_args", "")).strip()
+    args = get_stage_setting(slurm_cfg, stage, "mdrun_args")
+    if args is not None:
+        return str(args).strip()
     return ""
+
+
+def build_runtime_exports(slurm_cfg, stage, launchers):
+    exports = []
+    if any("srun" in launcher.split() for launcher in launchers if launcher):
+        srun_cpus = get_stage_setting(slurm_cfg, stage, "srun_cpus_per_task")
+        if srun_cpus is not None:
+            exports.append(f"export SRUN_CPUS_PER_TASK={srun_cpus}")
+        else:
+            exports.append('export SRUN_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-1}"')
+
+    omp_threads = get_stage_setting(slurm_cfg, stage, "omp_num_threads")
+    if omp_threads is not None:
+        exports.append(f"export OMP_NUM_THREADS={omp_threads}")
+    else:
+        exports.append('export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"')
+    return "\n".join(exports)
 
 
 def build_sbatch_directives(slurm_cfg, stage, job_name, output_path, error_path):
@@ -74,6 +95,7 @@ def write_setup_sh(path, cfg, abs_rep_path, aggregate_log_path):
     grompp_launcher = get_slurm_step_launcher(slurm_cfg, "setup", "grompp")
     mdrun_launcher = get_slurm_step_launcher(slurm_cfg, "setup", "mdrun")
     mdrun_extra_args = get_mdrun_extra_args(slurm_cfg, "setup")
+    runtime_exports = build_runtime_exports(slurm_cfg, "setup", [grompp_launcher, mdrun_launcher])
     sbatch_block = build_sbatch_directives(
         slurm_cfg,
         "setup",
@@ -90,8 +112,7 @@ set -euo pipefail
 {module_block}
 source ~/miniconda3/bin/activate {project_cfg['conda_env']}
 
-export SRUN_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+{runtime_exports}
 
 BASE="{abs_rep_path}"
 GMX="{project_cfg.get('gmx_executable_path', 'gmx_mpi')}"
@@ -175,6 +196,7 @@ def write_prod_sh(path, cfg, abs_rep_path, chunk_idx, aggregate_log_path):
     grompp_launcher = get_slurm_step_launcher(slurm_cfg, "prod", "grompp")
     mdrun_launcher = get_slurm_step_launcher(slurm_cfg, "prod", "mdrun")
     mdrun_extra_args = get_mdrun_extra_args(slurm_cfg, "prod")
+    runtime_exports = build_runtime_exports(slurm_cfg, "prod", [grompp_launcher, mdrun_launcher])
     sbatch_block = build_sbatch_directives(
         slurm_cfg,
         "prod",
@@ -189,8 +211,7 @@ set -euo pipefail
 
 {module_block}
 
-export SRUN_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+{runtime_exports}
 
 GMX="{project_cfg.get('gmx_executable_path', 'gmx_mpi')}"
 AGG_LOG="{aggregate_log_path}"
