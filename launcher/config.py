@@ -203,6 +203,7 @@ target_molarity_mol_l = 1.0
 tolerance_mol_l = 0.05
 max_iterations = 5
 reference_count = 150
+box_size_nm = 10.0
 initial_ratio_name = "ratio_1"
 force_field_name = "ff_set1"
 temperature = 298.15
@@ -231,5 +232,9 @@ def create_default_config(filename):
 def load_config(config_path):
     if not os.path.exists(config_path):
         create_default_config(config_path)
-    with open(config_path, "rb") as f:
-        return tomllib.load(f)
+    abs_config_path = os.path.abspath(config_path)
+    with open(abs_config_path, "rb") as f:
+        cfg = tomllib.load(f)
+    cfg["__config_path"] = abs_config_path
+    cfg["__config_dir"] = os.path.dirname(abs_config_path)
+    return cfg

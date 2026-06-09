@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 from .mdp import modify_mdp
+from .paths import get_inputs_dir, get_template_dir
 
 
 def append_file_to_aggregate_log(aggregate_path, source_path, section_title):
@@ -54,14 +55,16 @@ def rebuild_replica_grompp_log(rep_root):
 
 def prepare_replica_stage_inputs(rep_root, cfg, order, active_itps, species_cfg, counts, temp, label):
     topology_include = cfg["project_settings"].get("topology_forcefield_include", "forcefield.itp")
+    inputs_dir = get_inputs_dir(cfg)
+    tdir = get_template_dir(cfg)
     for stage in ["1_min", "2_press", "3_anneal", "4_prod"]:
         dest = os.path.join(rep_root, stage)
         os.makedirs(dest, exist_ok=True)
         for filename in cfg["project_settings"]["global_ff_files"]:
-            shutil.copy(f"inputs/{filename}", f"{dest}/{filename}")
+            shutil.copy(os.path.join(inputs_dir, filename), f"{dest}/{filename}")
         for key in order:
-            shutil.copy(f"inputs/{active_itps[key]}", f"{dest}/{active_itps[key]}")
-            shutil.copy(f"inputs/{species_cfg[key]['gro']}", f"{dest}/{species_cfg[key]['gro']}")
+            shutil.copy(os.path.join(inputs_dir, active_itps[key]), f"{dest}/{active_itps[key]}")
+            shutil.copy(os.path.join(inputs_dir, species_cfg[key]["gro"]), f"{dest}/{species_cfg[key]['gro']}")
 
         with open(os.path.join(dest, "topol.top"), "w", encoding="utf-8") as top:
             top.write(f'#include "{topology_include}"\n')
@@ -71,7 +74,7 @@ def prepare_replica_stage_inputs(rep_root, cfg, order, active_itps, species_cfg,
             for key in order:
                 top.write(f"{species_cfg[key]['resname']:<15} {counts[key]}\n")
 
-        tdir, sim = cfg["project_settings"]["template_dir"], cfg["simulation_settings"]
+        sim = cfg["simulation_settings"]
         if stage == "1_min":
             shutil.copy(f"{tdir}/min.mdp", f"{dest}/min.mdp")
         elif stage == "2_press":
@@ -135,7 +138,7 @@ def build_initial_box_if_needed(rep_root, label, counts, order, species_cfg, gmx
         cmd = (
             f"mpirun -np 1 {gmx_path} insert-molecules "
             f"{'-box ' + str(box) + ' ' + str(box) + ' ' + str(box) if curr is None else '-f ' + curr} "
-            f"-ci inputs/{species_cfg[key]['gro']} -nmol {counts[key]} -o {out} -seed {replica_idx * 123}"
+            f"-ci {os.path.join(min_dir, species_cfg[key]['gro'])} -nmol {counts[key]} -o {out} -seed {replica_idx * 123}"
         )
         job_log(f"Replica {replica_idx}: insert-molecules for '{key}' (nmol={counts[key]}).")
         res = subprocess.run(cmd.split(), capture_output=True, text=True)
@@ -170,4 +173,3 @@ def replica_has_existing_state(rep_root):
         return any(True for _ in os.scandir(rep_root))
     except OSError:
         return True
-

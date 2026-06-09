@@ -5,7 +5,7 @@ import sys
 
 from .case_matrix import build_case_contexts, build_master_combos, discover_groups, normalize_species_config, resolve_system_size
 from .config import load_config
-from .paths import get_output_root
+from .paths import get_inputs_dir, get_output_root
 from .slurm import submit_sbatch, write_prod_sh, write_setup_sh
 from .status_reporting import collect_progress_snapshot, get_next_unused_chunk_idx, get_target_prod_steps, is_setup_complete, make_job_logger, parse_chunk_err_status
 from .system_setup import build_initial_box_if_needed, prepare_replica_stage_inputs, rebuild_replica_grompp_log
@@ -27,7 +27,7 @@ def run_relaunch(config_path, confirm=False):
         return 1
 
     cfg = load_config(config_path)
-    species_cfg = normalize_species_config(cfg["species"])
+    species_cfg = normalize_species_config(cfg["species"], inputs_dir=get_inputs_dir(cfg))
     group_defs, group_keys, active_species_keys = discover_groups(cfg, species_cfg)
     order = active_species_keys
     master_combos = build_master_combos(cfg, group_keys, order)
@@ -175,4 +175,3 @@ def cli_main():
     )
     args = parser.parse_args()
     sys.exit(run_relaunch(args.config, confirm=args.confirm))
-

@@ -3,6 +3,8 @@ import re
 import shutil
 import subprocess
 
+from .paths import get_scripts_dir
+
 
 def shell_join(parts):
     return " ".join(str(part) for part in parts if str(part).strip())
@@ -91,7 +93,7 @@ def build_sbatch_directives(slurm_cfg, stage, job_name, output_path, error_path)
 def write_setup_sh(path, cfg, abs_rep_path, aggregate_log_path):
     project_cfg, slurm_cfg = cfg["project_settings"], cfg["slurm_settings"]
     module_block = "\n".join(project_cfg.get("gmx_modules", []))
-    analysis_script = os.path.join(os.getcwd(), project_cfg["scripts_dir"], project_cfg["density_analysis_script"])
+    analysis_script = os.path.join(get_scripts_dir(cfg), project_cfg["density_analysis_script"])
     grompp_launcher = get_slurm_step_launcher(slurm_cfg, "setup", "grompp")
     mdrun_launcher = get_slurm_step_launcher(slurm_cfg, "setup", "mdrun")
     mdrun_extra_args = get_mdrun_extra_args(slurm_cfg, "setup")

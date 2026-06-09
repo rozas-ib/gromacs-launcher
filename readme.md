@@ -186,13 +186,17 @@ It works on one selected case definition at a time:
 - one temperature chosen by `concentration_optimizer.temperature`
 - one top-level formulation group chosen by `concentration_optimizer.target_group`
 
-The optimizer keeps the non-target group weights fixed relative to the selected starting ratio, adjusts only the target-group weight between iterations, and after each finished `min -> press -> npt` iteration it:
+The optimizer keeps the target-group count fixed at `concentration_optimizer.reference_count`. It adjusts only the non-target group counts between iterations, preserving their relative proportions from the previous iteration. If the achieved molarity is above the target, it increases the non-target counts; if the achieved molarity is below the target, it decreases the non-target counts.
+
+For every optimizer iteration, the `1_min/start.gro` insertion box uses the artificial cubic size from `concentration_optimizer.box_size_nm`. This is intentionally separate from the physical target volume used to estimate molecule counts from `reference_count`, `target_molarity_mol_l`, and `initial_density_guess_kg_m3`.
+
+After each finished `min -> press -> npt` iteration it:
 
 1. reads the final `npt_out.gro` box volume
 2. reads the NPT density from `npt.edr` when available
 3. computes the achieved molarity of the target group
 4. compares it against `concentration_optimizer.target_molarity_mol_l`
-5. either stops if the result is inside `concentration_optimizer.tolerance_mol_l`, or prepares the next guess
+5. either stops if the result is inside `concentration_optimizer.tolerance_mol_l`, or prepares the next non-target-count guess
 
 Suggested config block:
 
@@ -203,6 +207,8 @@ target_group = "LiFSI_salt"
 target_molarity_mol_l = 1.0
 tolerance_mol_l = 0.05
 max_iterations = 5
+reference_count = 150
+box_size_nm = 10.0
 initial_ratio_name = "ratio_1"
 force_field_name = "ff_set1"
 temperature = 298.15

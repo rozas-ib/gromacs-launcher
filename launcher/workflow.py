@@ -14,7 +14,7 @@ from .case_matrix import (
     resolve_system_size,
 )
 from .config import load_config
-from .paths import get_output_root
+from .paths import get_inputs_dir, get_output_root
 from .slurm import collect_slurm_status_map, submit_sbatch, write_prod_sh, write_setup_sh
 from .status_reporting import (
     build_progress_row,
@@ -41,7 +41,7 @@ def run_launch(config_path, dry_run=False, track_progress=False):
         return 1
 
     cfg = load_config(config_path)
-    species_cfg = normalize_species_config(cfg["species"])
+    species_cfg = normalize_species_config(cfg["species"], inputs_dir=get_inputs_dir(cfg))
     group_defs, group_keys, active_species_keys = discover_groups(cfg, species_cfg)
     order = active_species_keys
     master_combos = build_master_combos(cfg, group_keys, order)

@@ -13,14 +13,14 @@ from .case_matrix import (
     build_case_label,
     discover_groups,
     fmt_num,
+    get_atoms_per_molecule,
     normalize_force_field_sets,
     normalize_species_config,
     normalize_component_ratios,
-    resolve_system_size,
 )
 from .config import load_config
 from .mdp import modify_mdp
-from .paths import get_output_root
+from .paths import get_inputs_dir, get_output_root, get_scripts_dir, get_template_dir
 from .slurm import (
     build_runtime_exports,
     build_sbatch_directives,
@@ -44,6 +44,7 @@ class ConcentrationOptimizerConfig:
     tolerance_mol_l: float
     max_iterations: int
     reference_count: int
+    box_size_nm: float
     initial_ratio_name: str
     force_field_name: str
     temperature: float
@@ -82,12 +83,17 @@ def load_optimizer_config(cfg):
             "concentration_optimizer is not enabled in the config. "
             "Set [concentration_optimizer].enabled = true to use this tool."
         )
+    if "box_size_nm" not in raw:
+        raise ValueError(
+            "concentration_optimizer.box_size_nm must be set to the artificial insertion/minimization box size"
+        )
     optimizer_cfg = ConcentrationOptimizerConfig(
         target_group=str(raw["target_group"]),
         target_molarity_mol_l=float(raw["target_molarity_mol_l"]),
         tolerance_mol_l=float(raw["tolerance_mol_l"]),
         max_iterations=int(raw.get("max_iterations", 5)),
         reference_count=int(raw.get("reference_count", 150)),
+        box_size_nm=float(raw["box_size_nm"]),
         initial_ratio_name=str(raw["initial_ratio_name"]),
         force_field_name=str(raw["force_field_name"]),
         temperature=float(raw["temperature"]),
@@ -118,6 +124,8 @@ def load_optimizer_config(cfg):
         raise ValueError("concentration_optimizer.max_iterations must be > 0")
     if optimizer_cfg.reference_count <= 0:
         raise ValueError("concentration_optimizer.reference_count must be > 0")
+    if optimizer_cfg.box_size_nm <= 0:
+        raise ValueError("concentration_optimizer.box_size_nm must be > 0")
     if not 0.0 < optimizer_cfg.density_average_fraction <= 1.0:
         raise ValueError("concentration_optimizer.density_average_fraction must be in (0, 1]")
     if optimizer_cfg.max_weight_change_factor <= 1.0:
@@ -271,10 +279,10 @@ def parse_itp_molar_mass(itp_path):
     return total_mass
 
 
-def build_species_molar_masses(active_itps):
+def build_species_molar_masses(inputs_dir, active_itps):
     masses = {}
     for species_key, itp_name in active_itps.items():
-        masses[species_key] = parse_itp_molar_mass(os.path.join("inputs", itp_name))
+        masses[species_key] = parse_itp_molar_mass(os.path.join(inputs_dir, itp_name))
     return masses
 
 
@@ -316,8 +324,7 @@ def run_density_analysis(cfg, opt_cfg, iter_root):
     if not os.path.exists(edr_path):
         return None
     analysis_script = os.path.join(
-        os.getcwd(),
-        cfg["project_settings"]["scripts_dir"],
+        get_scripts_dir(cfg),
         cfg["project_settings"]["density_analysis_script"],
     )
     metadata_path = density_selection_metadata_path(iter_root)
@@ -383,14 +390,6 @@ def extract_selected_volume_from_density_analysis(cfg, opt_cfg, iter_root):
     }
 
 
-def estimate_initial_target_group_weight(opt_cfg, base_component_ratio, base_group_counts):
-    current_weight = float(base_component_ratio[opt_cfg.target_group])
-    if opt_cfg.initial_density_guess_kg_m3 is None:
-        return current_weight
-    scale_factor = float(opt_cfg.initial_density_guess_kg_m3) / 1000.0
-    return max(1e-6, current_weight * scale_factor)
-
-
 def build_density_driven_initial_guess(cfg, opt_cfg, group_defs, group_keys, order, active_itps, base_component_ratio):
     if opt_cfg.initial_density_guess_kg_m3 is None:
         return None
@@ -399,14 +398,12 @@ def build_density_driven_initial_guess(cfg, opt_cfg, group_defs, group_keys, ord
     target_group_moles = target_group_count / AVOGADRO
     volume_l = target_group_moles / float(opt_cfg.target_molarity_mol_l)
     volume_nm3 = volume_l * 1e24
-    scale_factor = float(cfg["project_settings"].get("box_scale_factor", 1.0))
-    box_size_nm = (scale_factor * volume_nm3) ** (1.0 / 3.0)
     density_g_l = float(opt_cfg.initial_density_guess_kg_m3)
     total_mass_g = density_g_l * volume_l
     if total_mass_g <= 0:
         raise ValueError("Initial density guess leads to non-positive total mass")
 
-    species_molar_masses = build_species_molar_masses(active_itps)
+    species_molar_masses = build_species_molar_masses(get_inputs_dir(cfg), active_itps)
     group_molar_masses = build_group_molar_masses(group_defs, group_keys, species_molar_masses)
 
     target_group_mass_g = (target_group_count / AVOGADRO) * group_molar_masses[opt_cfg.target_group]
@@ -444,22 +441,124 @@ def build_density_driven_initial_guess(cfg, opt_cfg, group_defs, group_keys, ord
     species_counts = accumulate_species_counts_from_groups(group_counts, group_defs, order)
     component_ratio = {key: float(max(group_counts[key], 1 if key == opt_cfg.target_group else 0)) for key in group_keys}
     return {
-        "box_size_nm": box_size_nm,
+        "box_size_nm": opt_cfg.box_size_nm,
+        "box_source": "concentration_optimizer.box_size_nm",
         "group_counts": group_counts,
         "species_counts": species_counts,
         "component_ratio": component_ratio,
         "species_molar_masses": species_molar_masses,
         "group_molar_masses": group_molar_masses,
         "initial_volume_l": volume_l,
+        "initial_volume_nm3": volume_nm3,
         "initial_total_mass_g": total_mass_g,
         "reference_count": target_group_count,
     }
 
 
-def write_optimizer_history(opt_root, completed_results):
+def build_fixed_count_sizing_info(cfg, opt_cfg, species_cfg, order, group_defs, group_keys, group_counts, explicit_box_size_nm=None, explicit_box_source=None):
+    species_counts = accumulate_species_counts_from_groups(group_counts, group_defs, order)
+    total_atoms = sum(species_counts[k] * get_atoms_per_molecule(species_cfg, k) for k in order)
+    if explicit_box_size_nm is not None:
+        box_size_nm = float(explicit_box_size_nm)
+        box_source = explicit_box_source or "concentration_optimizer.fixed_reference_count"
+    else:
+        box_size_nm = float(opt_cfg.box_size_nm)
+        box_source = "concentration_optimizer.box_size_nm"
+    return species_counts, {
+        "mode": "concentration_optimizer_fixed_reference_count",
+        "n_total_components": sum(int(v) for v in group_counts.values()),
+        "total_atoms": total_atoms,
+        "box_size_nm": box_size_nm,
+        "box_source": box_source,
+        "component_counts": group_counts,
+    }
+
+
+def build_reference_count_initial_guess(cfg, opt_cfg, species_cfg, group_defs, group_keys, order, base_component_ratio):
+    target_weight = float(base_component_ratio[opt_cfg.target_group])
+    if target_weight <= 0:
+        raise ValueError(
+            f"concentration_optimizer.target_group='{opt_cfg.target_group}' has zero weight "
+            f"in screening.component_ratios '{opt_cfg.initial_ratio_name}'"
+        )
+    target_group_count = int(opt_cfg.reference_count)
+    group_counts = {key: 0 for key in group_keys}
+    group_counts[opt_cfg.target_group] = target_group_count
+    for key in group_keys:
+        if key == opt_cfg.target_group:
+            continue
+        weight = float(base_component_ratio[key])
+        if weight > 0:
+            group_counts[key] = max(1, int(round(target_group_count * weight / target_weight)))
+    species_counts, sizing_info = build_fixed_count_sizing_info(
+        cfg,
+        opt_cfg,
+        species_cfg,
+        order,
+        group_defs,
+        group_keys,
+        group_counts,
+    )
+    return {
+        "box_size_nm": sizing_info["box_size_nm"],
+        "box_source": sizing_info["box_source"],
+        "group_counts": group_counts,
+        "species_counts": species_counts,
+        "component_ratio": {key: float(group_counts[key]) for key in group_keys},
+    }
+
+
+def next_reference_count_guess(opt_cfg, completed_results, group_keys):
+    if not completed_results:
+        raise ValueError("At least one completed result is required to compute the next count guess")
+    latest = completed_results[-1]
+    target = opt_cfg.target_molarity_mol_l
+    if latest.observed_molarity_mol_l <= 0:
+        raise ValueError("Observed molarity must be > 0 to compute the next count guess")
+    if latest.selected_frame_volume_nm3 <= 0:
+        raise ValueError("Selected frame volume must be > 0 to compute the next count guess")
+    latest_target_count = int(latest.group_counts.get(opt_cfg.target_group, opt_cfg.reference_count))
+    if latest_target_count <= 0:
+        raise ValueError("Latest target-group count must be > 0 to compute the next count guess")
+    raw_scale = (
+        (float(opt_cfg.reference_count) / float(latest_target_count))
+        * latest.observed_molarity_mol_l
+        / target
+    )
+    max_factor = opt_cfg.max_weight_change_factor
+    scale = min(max(raw_scale, 1.0 / max_factor), max_factor)
+
+    group_counts = {key: 0 for key in group_keys}
+    group_counts[opt_cfg.target_group] = int(opt_cfg.reference_count)
+    adjustable_count = 0
+    for key in group_keys:
+        if key == opt_cfg.target_group:
+            continue
+        previous_count = int(latest.group_counts.get(key, 0))
+        if previous_count <= 0:
+            continue
+        adjustable_count += previous_count
+        group_counts[key] = max(1, int(round(previous_count * scale)))
+
+    if adjustable_count <= 0:
+        raise ValueError(
+            "Concentration optimization cannot adjust molarity with a fixed target count because "
+            "the latest iteration has no non-target groups to increase or decrease."
+        )
+    return {
+        "group_counts": group_counts,
+        "component_ratio": {key: float(group_counts[key]) for key in group_keys},
+        "solvent_scale_factor": scale,
+        "raw_solvent_scale_factor": raw_scale,
+        "box_size_nm": opt_cfg.box_size_nm,
+        "box_source": "concentration_optimizer.box_size_nm",
+    }
+
+
+def write_optimizer_history(opt_root, opt_cfg, completed_results):
     headers = [
         "iteration",
-        "target_group_weight",
+        "target_group_count",
         "observed_molarity_mol_l",
         "error_mol_l",
         "within_tolerance",
@@ -474,7 +573,7 @@ def write_optimizer_history(opt_root, completed_results):
             density_value = "" if result.observed_density_kg_m3 is None else str(result.observed_density_kg_m3)
             row = [
                 str(result.iteration_idx),
-                str(result.target_group_weight),
+                str(result.group_counts.get(opt_cfg.target_group, result.target_group_weight)),
                 str(result.observed_molarity_mol_l),
                 str(result.error_mol_l),
                 "yes" if result.within_tolerance else "no",
@@ -508,16 +607,17 @@ def iteration_stage_inputs(iter_root, cfg, species_order, active_itps, species_c
     sim_cfg = cfg["simulation_settings"]
     press_cfg = sim_cfg.get("conc_opt_press", sim_cfg["press"])
     npt_cfg = sim_cfg["conc_opt_npt"]
-    template_dir = cfg["project_settings"]["template_dir"]
+    template_dir = get_template_dir(cfg)
+    inputs_dir = get_inputs_dir(cfg)
 
     for stage in stage_names:
         dest = os.path.join(iter_root, stage)
         os.makedirs(dest, exist_ok=True)
         for filename in cfg["project_settings"]["global_ff_files"]:
-            shutil.copy(f"inputs/{filename}", f"{dest}/{filename}")
+            shutil.copy(os.path.join(inputs_dir, filename), f"{dest}/{filename}")
         for key in species_order:
-            shutil.copy(f"inputs/{active_itps[key]}", f"{dest}/{active_itps[key]}")
-            shutil.copy(f"inputs/{species_cfg[key]['gro']}", f"{dest}/{species_cfg[key]['gro']}")
+            shutil.copy(os.path.join(inputs_dir, active_itps[key]), f"{dest}/{active_itps[key]}")
+            shutil.copy(os.path.join(inputs_dir, species_cfg[key]["gro"]), f"{dest}/{species_cfg[key]['gro']}")
 
         with open(os.path.join(dest, "topol.top"), "w", encoding="utf-8") as top:
             top.write(f'#include "{topology_include}"\n')
@@ -556,7 +656,7 @@ def iteration_stage_inputs(iter_root, cfg, species_order, active_itps, species_c
 def write_optimizer_iteration_sh(iter_root, cfg, aggregate_log_path, config_path):
     project_cfg, slurm_cfg = cfg["project_settings"], cfg["slurm_settings"]
     module_block = "\n".join(project_cfg.get("gmx_modules", []))
-    optimizer_entrypoint = os.path.join(os.getcwd(), "optimize_concentration.py")
+    optimizer_entrypoint = os.path.join(cfg["__config_dir"], "optimize_concentration.py")
     grompp_launcher = get_slurm_step_launcher(slurm_cfg, "setup", "grompp")
     mdrun_launcher = get_slurm_step_launcher(slurm_cfg, "setup", "mdrun")
     mdrun_extra_args = get_mdrun_extra_args(slurm_cfg, "setup")
@@ -686,33 +786,6 @@ def load_completed_iteration(cfg, opt_cfg, iter_root):
     )
 
 
-def next_weight_guess(opt_cfg, completed_results):
-    if not completed_results:
-        raise ValueError("At least one completed result is required to compute the next weight guess")
-    latest = completed_results[-1]
-    target = opt_cfg.target_molarity_mol_l
-    if latest.observed_molarity_mol_l <= 0:
-        raise ValueError("Observed molarity must be > 0 to compute the next weight guess")
-    if len(completed_results) == 1:
-        raw_guess = latest.target_group_weight * (target / latest.observed_molarity_mol_l)
-    else:
-        prev = completed_results[-2]
-        denom = latest.observed_molarity_mol_l - prev.observed_molarity_mol_l
-        if abs(denom) < 1e-12:
-            raw_guess = latest.target_group_weight * (target / latest.observed_molarity_mol_l)
-        else:
-            raw_guess = latest.target_group_weight + (
-                (target - latest.observed_molarity_mol_l)
-                * (latest.target_group_weight - prev.target_group_weight)
-                / denom
-            )
-    max_factor = opt_cfg.max_weight_change_factor
-    lower = latest.target_group_weight / max_factor
-    upper = latest.target_group_weight * max_factor
-    bounded = min(max(raw_guess, lower), upper)
-    return max(1e-6, bounded)
-
-
 def render_ratio_snippet(component_ratio):
     lines = ["[[screening.component_ratios]]"]
     for key, value in component_ratio.items():
@@ -737,24 +810,31 @@ def prepare_iteration(
     explicit_species_counts=None,
     explicit_group_counts=None,
     explicit_box_size_nm=None,
+    explicit_sizing_mode=None,
+    explicit_box_source=None,
 ):
     iter_root = iteration_dir(opt_root, iter_idx)
     os.makedirs(iter_root, exist_ok=True)
     job_log, log_path = make_job_logger(iter_root, f"CONCENTRATION OPTIMIZER ITERATION {iter_idx}")
     grompp_log_path = rebuild_replica_grompp_log(iter_root)
 
-    if explicit_species_counts is not None and explicit_group_counts is not None and explicit_box_size_nm is not None:
-        counts = explicit_species_counts
-        sizing_info = {
-            "mode": "concentration_optimizer_density_guess",
-            "n_total_components": sum(int(v) for v in explicit_group_counts.values()),
-            "total_atoms": None,
-            "box_size_nm": float(explicit_box_size_nm),
-            "box_source": "concentration_optimizer.initial_density_guess_kg_m3",
-            "component_counts": explicit_group_counts,
-        }
-    else:
-        counts, sizing_info = resolve_system_size(cfg, species_cfg, order, group_defs, group_keys, component_ratio)
+    if explicit_species_counts is None or explicit_group_counts is None or explicit_box_size_nm is None:
+        raise ValueError(
+            "Concentration optimizer iterations require explicit fixed-reference-count sizing. "
+            "This avoids recalculating counts from [system_sizing]."
+        )
+    counts = explicit_species_counts
+    sizing_info = {
+        "mode": explicit_sizing_mode or "concentration_optimizer_fixed_reference_count",
+        "n_total_components": sum(int(v) for v in explicit_group_counts.values()),
+        "total_atoms": sum(
+            int(explicit_species_counts[key]) * get_atoms_per_molecule(species_cfg, key)
+            for key in order
+        ),
+        "box_size_nm": float(explicit_box_size_nm),
+        "box_source": explicit_box_source or "concentration_optimizer.fixed_reference_count",
+        "component_counts": explicit_group_counts,
+    }
     label = (
         f"concopt_iter_{iter_idx}_"
         f"T{fmt_num(case_ctx.temp)}_{case_ctx.ff_entry['name']}_{opt_cfg.target_group}_{fmt_num(component_ratio[opt_cfg.target_group])}"
@@ -782,6 +862,10 @@ def prepare_iteration(
         "group_counts": sizing_info["component_counts"],
         "species_counts": counts,
         "box_size_nm": sizing_info["box_size_nm"],
+        "sizing_mode": sizing_info["mode"],
+        "box_source": sizing_info["box_source"],
+        "reference_count": opt_cfg.reference_count,
+        "target_group_count_fixed": True,
         "force_field_name": case_ctx.ff_entry["name"],
         "temperature": case_ctx.temp,
     }
@@ -797,9 +881,11 @@ def prepare_iteration(
         print(f"ERROR submitting concentration optimization iteration {iter_idx}: {exc}")
         return 1
     job_log(f"Replica 1: submitted setup job with id {job_id}")
+    target_group_count = sizing_info["component_counts"][opt_cfg.target_group]
+    non_target_count = sizing_info["n_total_components"] - int(target_group_count)
     print(
         f"Submitted concentration optimization iteration {iter_idx} with job id {job_id} "
-        f"(target-group weight={component_ratio[opt_cfg.target_group]:.8g})"
+        f"(target-group count={target_group_count}, non-target count={non_target_count})"
     )
     return 0
 
@@ -821,21 +907,22 @@ def print_completed_summary(opt_cfg, completed_results):
     print("Completed concentration-optimization iterations:")
     for result in completed_results:
         density_txt = "n/a" if result.observed_density_kg_m3 is None else f"{result.observed_density_kg_m3:.3f} kg/m^3"
+        target_group_count = result.group_counts.get(opt_cfg.target_group, "n/a")
         print(
             f"- iter_{result.iteration_idx}: "
-            f"weight={result.target_group_weight:.8g}, "
-                f"molarity={result.observed_molarity_mol_l:.6f} mol/L, "
-                f"error={result.error_mol_l:+.6f} mol/L, "
-                f"density={density_txt}, "
-                f"selected_frame_time_ps={'n/a' if result.selected_frame_time_ps is None else f'{result.selected_frame_time_ps:.3f}'}, "
-                f"within_tolerance={'yes' if result.within_tolerance else 'no'}"
-            )
+            f"target_count={target_group_count}, "
+            f"molarity={result.observed_molarity_mol_l:.6f} mol/L, "
+            f"error={result.error_mol_l:+.6f} mol/L, "
+            f"density={density_txt}, "
+            f"selected_frame_time_ps={'n/a' if result.selected_frame_time_ps is None else f'{result.selected_frame_time_ps:.3f}'}, "
+            f"within_tolerance={'yes' if result.within_tolerance else 'no'}"
+        )
 
 
 def run_optimizer(config_path, auto_continue=False, dependency_job_id=None):
     cfg = load_config(config_path)
     opt_cfg = load_optimizer_config(cfg)
-    species_cfg = normalize_species_config(cfg["species"])
+    species_cfg = normalize_species_config(cfg["species"], inputs_dir=get_inputs_dir(cfg))
     group_defs, group_keys, active_species_keys = discover_groups(cfg, species_cfg)
     if opt_cfg.target_group not in group_keys:
         raise KeyError(
@@ -849,7 +936,7 @@ def run_optimizer(config_path, auto_continue=False, dependency_job_id=None):
     os.makedirs(opt_root, exist_ok=True)
 
     completed_results = collect_completed_results(cfg, opt_cfg, opt_root)
-    write_optimizer_history(opt_root, completed_results)
+    write_optimizer_history(opt_root, opt_cfg, completed_results)
     print_completed_summary(opt_cfg, completed_results)
     for result in completed_results:
         write_iteration_result(result)
@@ -911,6 +998,12 @@ def run_optimizer(config_path, auto_continue=False, dependency_job_id=None):
         print("ERROR: GMX not found")
         return 1
 
+    explicit_species_counts = None
+    explicit_group_counts = None
+    explicit_box_size_nm = None
+    explicit_sizing_mode = None
+    explicit_box_source = None
+
     if not completed_results:
         next_iter_idx = 1
         base_component_ratio = dict(case_ctx.ratio_entry["weights"])
@@ -925,18 +1018,46 @@ def run_optimizer(config_path, auto_continue=False, dependency_job_id=None):
         )
         if density_driven_guess is not None:
             component_ratio = density_driven_guess["component_ratio"]
+            explicit_species_counts = density_driven_guess["species_counts"]
+            explicit_group_counts = density_driven_guess["group_counts"]
+            explicit_box_size_nm = density_driven_guess["box_size_nm"]
+            explicit_sizing_mode = "concentration_optimizer_density_guess"
+            explicit_box_source = "concentration_optimizer.initial_density_guess_kg_m3"
         else:
-            component_ratio = dict(base_component_ratio)
-            counts, sizing_info = resolve_system_size(cfg, species_cfg, order, group_defs, group_keys, component_ratio)
-            component_ratio[opt_cfg.target_group] = estimate_initial_target_group_weight(
+            initial_guess = build_reference_count_initial_guess(
+                cfg,
                 opt_cfg,
-                component_ratio,
-                sizing_info["component_counts"],
+                species_cfg,
+                group_defs,
+                group_keys,
+                order,
+                base_component_ratio,
             )
+            component_ratio = initial_guess["component_ratio"]
+            explicit_species_counts = initial_guess["species_counts"]
+            explicit_group_counts = initial_guess["group_counts"]
+            explicit_box_size_nm = initial_guess["box_size_nm"]
+            explicit_sizing_mode = "concentration_optimizer_fixed_reference_count"
+            explicit_box_source = initial_guess["box_source"]
     else:
         next_iter_idx = completed_results[-1].iteration_idx + 1
-        component_ratio = dict(completed_results[-1].component_ratio)
-        component_ratio[opt_cfg.target_group] = next_weight_guess(opt_cfg, completed_results)
+        count_guess = next_reference_count_guess(opt_cfg, completed_results, group_keys)
+        component_ratio = count_guess["component_ratio"]
+        explicit_group_counts = count_guess["group_counts"]
+        explicit_species_counts, sizing_info = build_fixed_count_sizing_info(
+            cfg,
+            opt_cfg,
+            species_cfg,
+            order,
+            group_defs,
+            group_keys,
+            explicit_group_counts,
+            explicit_box_size_nm=count_guess["box_size_nm"],
+            explicit_box_source=count_guess["box_source"],
+        )
+        explicit_box_size_nm = sizing_info["box_size_nm"]
+        explicit_sizing_mode = sizing_info["mode"]
+        explicit_box_source = sizing_info["box_source"]
 
     print(
         f"\nPreparing concentration-optimization iteration {next_iter_idx} "
@@ -956,9 +1077,11 @@ def run_optimizer(config_path, auto_continue=False, dependency_job_id=None):
         gmx_path,
         os.path.abspath(config_path),
         dependency_job_id=dependency_job_id,
-        explicit_species_counts=(density_driven_guess["species_counts"] if not completed_results and density_driven_guess is not None else None),
-        explicit_group_counts=(density_driven_guess["group_counts"] if not completed_results and density_driven_guess is not None else None),
-        explicit_box_size_nm=(density_driven_guess["box_size_nm"] if not completed_results and density_driven_guess is not None else None),
+        explicit_species_counts=explicit_species_counts,
+        explicit_group_counts=explicit_group_counts,
+        explicit_box_size_nm=explicit_box_size_nm,
+        explicit_sizing_mode=explicit_sizing_mode,
+        explicit_box_source=explicit_box_source,
     )
 
 
