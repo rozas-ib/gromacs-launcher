@@ -33,8 +33,7 @@ def is_setup_complete(rep_root):
     return all(os.path.exists(path) for path in required)
 
 
-def get_target_prod_steps(prod_dir, cfg):
-    mdp_path = os.path.join(prod_dir, "nvt_run.mdp")
+def read_mdp_value(mdp_path, key):
     if os.path.exists(mdp_path):
         try:
             with open(mdp_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -42,19 +41,99 @@ def get_target_prod_steps(prod_dir, cfg):
                     cleaned = line.split(";")[0].strip()
                     if "=" not in cleaned:
                         continue
-                    key, val = [x.strip() for x in cleaned.split("=", 1)]
-                    if key == "nsteps":
-                        return int(float(val))
-        except (OSError, ValueError):
+                    item_key, val = [x.strip() for x in cleaned.split("=", 1)]
+                    if item_key == key:
+                        return val
+        except OSError:
             pass
+    return None
+
+
+def read_mdp_int(mdp_path, key):
+    value = read_mdp_value(mdp_path, key)
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except ValueError:
+        return None
+
+
+def read_mdp_float(mdp_path, key):
+    value = read_mdp_value(mdp_path, key)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def get_target_prod_steps(prod_dir, cfg):
+    mdp_path = os.path.join(prod_dir, "nvt_run.mdp")
+    nsteps = read_mdp_int(mdp_path, "nsteps")
+    if nsteps is not None:
+        return nsteps
     return int(cfg["simulation_settings"]["prod"]["nsteps"])
+
+
+def parse_max_step_from_text(content):
+    max_step = 0
+    step_pattern = re.compile(r"\bstep\s+([0-9]+)\b", re.IGNORECASE)
+    table_pattern = re.compile(r"^\s*([0-9]+)\s+[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?(?:\s|$)")
+    for match in step_pattern.finditer(content):
+        max_step = max(max_step, int(match.group(1)))
+    for line in content.splitlines():
+        match = table_pattern.match(line)
+        if match:
+            max_step = max(max_step, int(match.group(1)))
+    return max_step
+
+
+def parse_max_step_from_files(paths):
+    max_step = 0
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except (OSError, ValueError):
+            continue
+        max_step = max(max_step, parse_max_step_from_text(content))
+    return max_step
+
+
+def stage_time_progress(stage_dir, mdp_name, deffnm, output_gro, fallback_nsteps=None):
+    mdp_path = os.path.join(stage_dir, mdp_name)
+    target_steps = read_mdp_int(mdp_path, "nsteps")
+    if target_steps is None and fallback_nsteps is not None:
+        target_steps = int(fallback_nsteps)
+    dt = read_mdp_float(mdp_path, "dt")
+    completed = os.path.exists(os.path.join(stage_dir, output_gro))
+    current_step = parse_max_step_from_files([
+        os.path.join(stage_dir, f"{deffnm}.log"),
+        os.path.join(stage_dir, f"{deffnm}.err"),
+        os.path.join(stage_dir, f"{deffnm}.out"),
+    ])
+    if completed and target_steps is not None:
+        current_step = max(current_step, target_steps)
+    if target_steps is not None:
+        current_step = min(current_step, target_steps)
+    current_time_ps = "" if dt is None else current_step * dt
+    target_time_ps = "" if dt is None or target_steps is None else target_steps * dt
+    return {
+        "current_step": current_step,
+        "target_steps": "" if target_steps is None else target_steps,
+        "current_time_ps": current_time_ps,
+        "target_time_ps": target_time_ps,
+    }
 
 
 def parse_chunk_err_status(prod_dir, target_steps):
     completed_chunks = 0
     max_step = 0
     reached_target = False
-    step_pattern = re.compile(r"\bstep\s+([0-9]+)\b")
 
     idx = 1
     last_seen_chunk_idx = 0
@@ -69,9 +148,7 @@ def parse_chunk_err_status(prod_dir, target_steps):
         except OSError:
             break
 
-        steps = [int(m.group(1)) for m in step_pattern.finditer(content)]
-        if steps:
-            max_step = max(max_step, max(steps))
+        max_step = max(max_step, parse_max_step_from_text(content))
         if max_step >= target_steps:
             reached_target = True
             completed_chunks += 1
@@ -104,6 +181,28 @@ def get_next_unused_chunk_idx(prod_dir):
     return max_idx + 1 if max_idx > 0 else 1
 
 
+def production_time_progress(prod_dir, cfg, chunk_status):
+    target_steps = get_target_prod_steps(prod_dir, cfg)
+    dt = read_mdp_float(os.path.join(prod_dir, "nvt_run.mdp"), "dt")
+    if dt is None:
+        dt = float(cfg["simulation_settings"]["prod"]["dt"])
+    log_step = parse_max_step_from_files([
+        os.path.join(prod_dir, "nvt_run.log"),
+        os.path.join(prod_dir, "nvt_run.err"),
+        os.path.join(prod_dir, "nvt_run.out"),
+    ])
+    current_step = max(chunk_status["max_step"], log_step)
+    if chunk_status["reached_target"]:
+        current_step = max(current_step, target_steps)
+    current_step = min(current_step, target_steps)
+    return {
+        "current_step": current_step,
+        "target_steps": target_steps,
+        "current_time_ps": current_step * dt,
+        "target_time_ps": target_steps * dt,
+    }
+
+
 def status_flag(condition):
     return "yes" if condition else "no"
 
@@ -116,6 +215,22 @@ def build_progress_row(case_label, rep_idx, rep_root, cfg, launch_log_path, slur
 
     target_steps = get_target_prod_steps(prod_dir, cfg)
     chunk_status = parse_chunk_err_status(prod_dir, target_steps)
+    min_progress = stage_time_progress(min_dir, "min.mdp", "min", "min_out.gro")
+    press_progress = stage_time_progress(
+        press_dir,
+        "press.mdp",
+        "press",
+        "press_out.gro",
+        fallback_nsteps=cfg["simulation_settings"]["press"]["nsteps"],
+    )
+    anneal_progress = stage_time_progress(
+        anneal_dir,
+        "anneal.mdp",
+        "anneal",
+        "anneal_out.gro",
+        fallback_nsteps=cfg["simulation_settings"]["anneal"]["nsteps"],
+    )
+    prod_progress = production_time_progress(prod_dir, cfg, chunk_status)
     job_ids = parse_replica_job_ids(launch_log_path, rep_idx)
     tracked_job_id = job_ids["prod_job_id"] or job_ids["setup_job_id"]
     slurm_status = slurm_status_map.get(tracked_job_id)
@@ -135,14 +250,30 @@ def build_progress_row(case_label, rep_idx, rep_root, cfg, launch_log_path, slur
         "insert_molecules": status_flag(os.path.exists(os.path.join(min_dir, "start.gro"))),
         "grompp_min": status_flag(os.path.exists(os.path.join(min_dir, "min.tpr"))),
         "min_run": status_flag(os.path.exists(os.path.join(min_dir, "min_out.gro"))),
+        "min_current_step": min_progress["current_step"],
+        "min_target_steps": min_progress["target_steps"],
+        "min_current_time_ps": min_progress["current_time_ps"],
+        "min_target_time_ps": min_progress["target_time_ps"],
         "grompp_press": status_flag(os.path.exists(os.path.join(press_dir, "press.tpr"))),
         "press_run": status_flag(os.path.exists(os.path.join(press_dir, "press_out.gro"))),
+        "press_current_step": press_progress["current_step"],
+        "press_target_steps": press_progress["target_steps"],
+        "press_current_time_ps": press_progress["current_time_ps"],
+        "press_target_time_ps": press_progress["target_time_ps"],
         "grompp_anneal": status_flag(os.path.exists(os.path.join(anneal_dir, "anneal.tpr"))),
         "anneal_run": status_flag(os.path.exists(os.path.join(anneal_dir, "anneal_out.gro"))),
+        "anneal_current_step": anneal_progress["current_step"],
+        "anneal_target_steps": anneal_progress["target_steps"],
+        "anneal_current_time_ps": anneal_progress["current_time_ps"],
+        "anneal_target_time_ps": anneal_progress["target_time_ps"],
         "analysis_start_gro": status_flag(os.path.exists(os.path.join(prod_dir, "start.gro"))),
         "grompp_prod": status_flag(os.path.exists(os.path.join(prod_dir, "nvt_run.tpr"))),
         "prod_checkpoint": status_flag(os.path.exists(os.path.join(prod_dir, "nvt_run.cpt"))),
         "prod_target_reached": status_flag(chunk_status["reached_target"]),
+        "prod_current_step": prod_progress["current_step"],
+        "prod_target_steps": prod_progress["target_steps"],
+        "prod_current_time_ps": prod_progress["current_time_ps"],
+        "prod_target_time_ps": prod_progress["target_time_ps"],
         "max_step_seen": chunk_status["max_step"],
         "target_steps": target_steps,
         "next_chunk_idx": max(chunk_status["next_chunk_idx"], get_next_unused_chunk_idx(prod_dir)),
@@ -161,14 +292,30 @@ def write_progress_table(rows, output_dir):
         "insert_molecules",
         "grompp_min",
         "min_run",
+        "min_current_step",
+        "min_target_steps",
+        "min_current_time_ps",
+        "min_target_time_ps",
         "grompp_press",
         "press_run",
+        "press_current_step",
+        "press_target_steps",
+        "press_current_time_ps",
+        "press_target_time_ps",
         "grompp_anneal",
         "anneal_run",
+        "anneal_current_step",
+        "anneal_target_steps",
+        "anneal_current_time_ps",
+        "anneal_target_time_ps",
         "analysis_start_gro",
         "grompp_prod",
         "prod_checkpoint",
         "prod_target_reached",
+        "prod_current_step",
+        "prod_target_steps",
+        "prod_current_time_ps",
+        "prod_target_time_ps",
         "max_step_seen",
         "target_steps",
         "next_chunk_idx",
@@ -187,14 +334,30 @@ def write_progress_table(rows, output_dir):
         "insert_molecules": "insert-molecules",
         "grompp_min": "grompp min",
         "min_run": "min run",
+        "min_current_step": "min step",
+        "min_target_steps": "min target steps",
+        "min_current_time_ps": "min time ps",
+        "min_target_time_ps": "min target ps",
         "grompp_press": "grompp press",
         "press_run": "press run",
+        "press_current_step": "press step",
+        "press_target_steps": "press target steps",
+        "press_current_time_ps": "press time ps",
+        "press_target_time_ps": "press target ps",
         "grompp_anneal": "grompp anneal",
         "anneal_run": "anneal run",
+        "anneal_current_step": "anneal step",
+        "anneal_target_steps": "anneal target steps",
+        "anneal_current_time_ps": "anneal time ps",
+        "anneal_target_time_ps": "anneal target ps",
         "analysis_start_gro": "analysis/start.gro",
         "grompp_prod": "grompp prod",
         "prod_checkpoint": "prod cpt",
         "prod_target_reached": "target steps reached",
+        "prod_current_step": "prod step",
+        "prod_target_steps": "prod target steps",
+        "prod_current_time_ps": "prod time ps",
+        "prod_target_time_ps": "prod target ps",
         "max_step_seen": "max step seen",
         "target_steps": "target steps",
         "next_chunk_idx": "next chunk",
@@ -229,4 +392,3 @@ def collect_progress_snapshot(case_contexts, cfg):
         build_progress_row(label, replica_idx, rep_root, cfg, log_path_by_label[label], slurm_status_map)
         for label, replica_idx, rep_root in progress_row_refs
     ]
-

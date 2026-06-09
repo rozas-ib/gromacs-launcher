@@ -64,6 +64,7 @@ Recommended operational workflow:
 python optimize_concentration.py config.toml
 python launch_gromacs.py config.toml
 python launch_gromacs.py config.toml --track-progress
+python relaunch_failed_gromacs.py config.toml --track-progress
 python relaunch_failed_gromacs.py config.toml --confirm
 ```
 
@@ -97,6 +98,7 @@ Track-progress mode refreshes only the progress tables from the existing case fo
 
 ```bash
 python launch_gromacs.py config.toml --track-progress
+python relaunch_failed_gromacs.py config.toml --track-progress
 ```
 
 Recovery mode is handled by a separate script. It previews the failed or incomplete idle replicas first, and only resubmits them if `--confirm` is present:
@@ -427,14 +429,30 @@ The progress table is generated on every launcher run and summarizes each case/r
 - `insert-molecules`
 - `grompp min`
 - `min run`
+- `min step`
+- `min target steps`
+- `min time ps`
+- `min target ps`
 - `grompp press`
 - `press run`
+- `press step`
+- `press target steps`
+- `press time ps`
+- `press target ps`
 - `grompp anneal`
 - `anneal run`
+- `anneal step`
+- `anneal target steps`
+- `anneal time ps`
+- `anneal target ps`
 - `analysis/start.gro`
 - `grompp prod`
 - `prod cpt`
 - `target steps reached`
+- `prod step`
+- `prod target steps`
+- `prod time ps`
+- `prod target ps`
 - `max step seen`
 - `target steps`
 - `next chunk`
@@ -447,7 +465,7 @@ The launcher now also tries to populate the Slurm columns from the most recent k
 
 The rest of the table remains a filesystem snapshot. It reports what has already been created or completed according to the files and logs present in each replica directory.
 
-If you want to refresh only this table while calculations are already running, use `--track-progress`. That mode is read-only with respect to the simulation workflow: it only observes the current files/logs and rewrites `<output_root>/simulation_progress.md` and `<output_root>/simulation_progress.csv`.
+If you want to refresh only this table while calculations are already running, use `--track-progress` with either `launch_gromacs.py` or `relaunch_failed_gromacs.py`. That mode is read-only with respect to the simulation workflow: it only observes the current files/logs and rewrites `<output_root>/simulation_progress.md` and `<output_root>/simulation_progress.csv`.
 
 `relaunch_failed_gromacs.py` is the recovery entry point:
 
@@ -532,6 +550,7 @@ python launch_gromacs.py config.toml
 
 ```bash
 python launch_gromacs.py config.toml --track-progress
+python relaunch_failed_gromacs.py config.toml --track-progress
 ```
 
 7. Preview or confirm recovery of failed/incomplete idle replicas:

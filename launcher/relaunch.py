@@ -7,7 +7,15 @@ from .case_matrix import build_case_contexts, build_master_combos, discover_grou
 from .config import load_config
 from .paths import get_inputs_dir, get_output_root
 from .slurm import submit_sbatch, write_prod_sh, write_setup_sh
-from .status_reporting import collect_progress_snapshot, get_next_unused_chunk_idx, get_target_prod_steps, is_setup_complete, make_job_logger, parse_chunk_err_status
+from .status_reporting import (
+    collect_progress_snapshot,
+    get_next_unused_chunk_idx,
+    get_target_prod_steps,
+    is_setup_complete,
+    make_job_logger,
+    parse_chunk_err_status,
+    write_progress_table,
+)
 from .system_setup import build_initial_box_if_needed, prepare_replica_stage_inputs, rebuild_replica_grompp_log
 
 
@@ -21,7 +29,7 @@ def classify_relaunch_candidate(row, rep_root):
     return "idle_incomplete_or_failed_relaunchable", True
 
 
-def run_relaunch(config_path, confirm=False):
+def run_relaunch(config_path, confirm=False, track_progress=False):
     if not os.path.exists(config_path):
         print(f"ERROR: config file '{config_path}' does not exist.")
         return 1
@@ -34,6 +42,10 @@ def run_relaunch(config_path, confirm=False):
     output_root = get_output_root(cfg)
     case_contexts = build_case_contexts(master_combos, order, group_keys, output_root)
     progress_rows = collect_progress_snapshot(case_contexts, cfg)
+    if track_progress:
+        progress_csv_path, progress_md_path = write_progress_table(progress_rows, output_root)
+        print(f"Track-progress mode: refreshed {progress_md_path} and {progress_csv_path}")
+        return 0
 
     rows_by_key = {(row["simulation"], int(row["replica"])): row for row in progress_rows}
     summary = {
@@ -173,5 +185,10 @@ def cli_main():
         action="store_true",
         help="Actually relaunch the failed/incomplete idle replicas listed in the preview",
     )
+    parser.add_argument(
+        "--track-progress",
+        action="store_true",
+        help="Do not relaunch simulations; only refresh the progress tables from existing files/logs and Slurm state",
+    )
     args = parser.parse_args()
-    sys.exit(run_relaunch(args.config, confirm=args.confirm))
+    sys.exit(run_relaunch(args.config, confirm=args.confirm, track_progress=args.track_progress))
