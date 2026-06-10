@@ -199,7 +199,7 @@ dt = 0.002
 [concentration_optimizer]
 enabled = false
 target_group = "LiFSI_salt"
-target_molarity_mol_l = 1.0
+target_molarity_mol_l = [1.0]
 tolerance_mol_l = 0.05
 max_iterations = 5
 reference_count = 150

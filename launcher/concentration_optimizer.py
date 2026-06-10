@@ -76,7 +76,28 @@ class CompletedIteration:
     selected_frame_volume_nm3: float
 
 
-def load_optimizer_config(cfg):
+def parse_target_molarities(raw):
+    value = raw["target_molarity_mol_l"]
+    values = value if isinstance(value, list) else [value]
+    if not values:
+        raise ValueError("concentration_optimizer.target_molarity_mol_l must contain at least one value")
+    targets = []
+    seen = set()
+    for item in values:
+        target = float(item)
+        if target <= 0:
+            raise ValueError("concentration_optimizer.target_molarity_mol_l values must be > 0")
+        if target in seen:
+            raise ValueError(
+                "concentration_optimizer.target_molarity_mol_l contains duplicate target "
+                f"{target:g}"
+            )
+        seen.add(target)
+        targets.append(target)
+    return targets
+
+
+def load_optimizer_configs(cfg, target_molarity_filter=None):
     raw = cfg.get("concentration_optimizer")
     if not isinstance(raw, dict) or not raw.get("enabled", False):
         raise ValueError(
@@ -87,52 +108,78 @@ def load_optimizer_config(cfg):
         raise ValueError(
             "concentration_optimizer.box_size_nm must be set to the artificial insertion/minimization box size"
         )
-    optimizer_cfg = ConcentrationOptimizerConfig(
-        target_group=str(raw["target_group"]),
-        target_molarity_mol_l=float(raw["target_molarity_mol_l"]),
-        tolerance_mol_l=float(raw["tolerance_mol_l"]),
-        max_iterations=int(raw.get("max_iterations", 5)),
-        reference_count=int(raw.get("reference_count", 150)),
-        box_size_nm=float(raw["box_size_nm"]),
-        initial_ratio_name=str(raw["initial_ratio_name"]),
-        force_field_name=str(raw["force_field_name"]),
-        temperature=float(raw["temperature"]),
-        output_subdir=str(raw.get("output_subdir", "concentration_optimizer")),
-        density_average_fraction=float(raw.get("density_average_fraction", 0.2)),
-        max_weight_change_factor=float(raw.get("max_weight_change_factor", 3.0)),
-        initial_density_guess_kg_m3=(
+    target_molarities = parse_target_molarities(raw)
+    if target_molarity_filter is not None:
+        requested = float(target_molarity_filter)
+        target_molarities = [
+            target for target in target_molarities
+            if math.isclose(target, requested, rel_tol=0.0, abs_tol=1e-12)
+        ]
+        if not target_molarities:
+            raise ValueError(
+                "Requested target molarity "
+                f"{requested:g} is not listed in concentration_optimizer.target_molarity_mol_l"
+            )
+
+    common = {
+        "target_group": str(raw["target_group"]),
+        "tolerance_mol_l": float(raw["tolerance_mol_l"]),
+        "max_iterations": int(raw.get("max_iterations", 5)),
+        "reference_count": int(raw.get("reference_count", 150)),
+        "box_size_nm": float(raw["box_size_nm"]),
+        "initial_ratio_name": str(raw["initial_ratio_name"]),
+        "force_field_name": str(raw["force_field_name"]),
+        "temperature": float(raw["temperature"]),
+        "output_subdir": str(raw.get("output_subdir", "concentration_optimizer")),
+        "density_average_fraction": float(raw.get("density_average_fraction", 0.2)),
+        "max_weight_change_factor": float(raw.get("max_weight_change_factor", 3.0)),
+        "initial_density_guess_kg_m3": (
             None if raw.get("initial_density_guess_kg_m3") in (None, "")
             else float(raw.get("initial_density_guess_kg_m3"))
         ),
-        density_analysis_tolerance=float(raw.get("density_analysis_tolerance", 0.01)),
-        density_analysis_show_points=int(raw.get("density_analysis_show_points", 20)),
-        density_analysis_window_size=int(raw.get("density_analysis_window_size", 10)),
-        density_analysis_mean_threshold=float(raw.get("density_analysis_mean_threshold", 0.1)),
-        density_analysis_distance=int(raw.get("density_analysis_distance", 1)),
-        density_analysis_min_consecutive_points=int(raw.get("density_analysis_min_consecutive_points", 1)),
-        density_analysis_time_crop=(
+        "density_analysis_tolerance": float(raw.get("density_analysis_tolerance", 0.01)),
+        "density_analysis_show_points": int(raw.get("density_analysis_show_points", 20)),
+        "density_analysis_window_size": int(raw.get("density_analysis_window_size", 10)),
+        "density_analysis_mean_threshold": float(raw.get("density_analysis_mean_threshold", 0.1)),
+        "density_analysis_distance": int(raw.get("density_analysis_distance", 1)),
+        "density_analysis_min_consecutive_points": int(raw.get("density_analysis_min_consecutive_points", 1)),
+        "density_analysis_time_crop": (
             str(raw.get("density_analysis_time_crop")).strip()
             if raw.get("density_analysis_time_crop") not in (None, "")
             else None
         ),
-    )
-    if optimizer_cfg.target_molarity_mol_l <= 0:
-        raise ValueError("concentration_optimizer.target_molarity_mol_l must be > 0")
-    if optimizer_cfg.tolerance_mol_l <= 0:
+    }
+    if common["tolerance_mol_l"] <= 0:
         raise ValueError("concentration_optimizer.tolerance_mol_l must be > 0")
-    if optimizer_cfg.max_iterations <= 0:
+    if common["max_iterations"] <= 0:
         raise ValueError("concentration_optimizer.max_iterations must be > 0")
-    if optimizer_cfg.reference_count <= 0:
+    if common["reference_count"] <= 0:
         raise ValueError("concentration_optimizer.reference_count must be > 0")
-    if optimizer_cfg.box_size_nm <= 0:
+    if common["box_size_nm"] <= 0:
         raise ValueError("concentration_optimizer.box_size_nm must be > 0")
-    if not 0.0 < optimizer_cfg.density_average_fraction <= 1.0:
+    if not 0.0 < common["density_average_fraction"] <= 1.0:
         raise ValueError("concentration_optimizer.density_average_fraction must be in (0, 1]")
-    if optimizer_cfg.max_weight_change_factor <= 1.0:
+    if common["max_weight_change_factor"] <= 1.0:
         raise ValueError("concentration_optimizer.max_weight_change_factor must be > 1")
-    if optimizer_cfg.initial_density_guess_kg_m3 is not None and optimizer_cfg.initial_density_guess_kg_m3 <= 0:
+    if common["initial_density_guess_kg_m3"] is not None and common["initial_density_guess_kg_m3"] <= 0:
         raise ValueError("concentration_optimizer.initial_density_guess_kg_m3 must be > 0 when provided")
-    return optimizer_cfg
+    return [
+        ConcentrationOptimizerConfig(
+            target_molarity_mol_l=target_molarity,
+            **common,
+        )
+        for target_molarity in target_molarities
+    ]
+
+
+def load_optimizer_config(cfg):
+    configs = load_optimizer_configs(cfg)
+    if len(configs) != 1:
+        raise ValueError(
+            "concentration_optimizer.target_molarity_mol_l contains multiple values; "
+            "use load_optimizer_configs for multi-target workflows"
+        )
+    return configs[0]
 
 
 def resolve_optimizer_case(cfg, optimizer_cfg, group_keys, species_order):
@@ -653,7 +700,7 @@ def iteration_stage_inputs(iter_root, cfg, species_order, active_itps, species_c
             )
 
 
-def write_optimizer_iteration_sh(iter_root, cfg, aggregate_log_path, config_path):
+def write_optimizer_iteration_sh(iter_root, cfg, opt_cfg, aggregate_log_path, config_path):
     project_cfg, slurm_cfg = cfg["project_settings"], cfg["slurm_settings"]
     module_block = "\n".join(project_cfg.get("gmx_modules", []))
     optimizer_entrypoint = os.path.join(cfg["__config_dir"], "optimize_concentration.py")
@@ -724,7 +771,7 @@ fi
 append_stage_log "$(basename "$BASE") | 3_npt/grompp_npt.log" "$BASE/3_npt/grompp_npt.log"
 {shell_join([mdrun_launcher, "$GMX", "mdrun -deffnm npt -c npt_out.gro -pin on", mdrun_extra_args])}
 
-python3 "{optimizer_entrypoint}" "{config_path}" --auto-continue --dependency-job-id "$SLURM_JOB_ID"
+python3 "{optimizer_entrypoint}" "{config_path}" --auto-continue --dependency-job-id "$SLURM_JOB_ID" --target-molarity-mol-l "{opt_cfg.target_molarity_mol_l:.17g}"
 """
     with open(os.path.join(iter_root, "run_concentration_iteration.sh"), "w", encoding="utf-8") as f:
         f.write(script_content)
@@ -870,7 +917,7 @@ def prepare_iteration(
         "temperature": case_ctx.temp,
     }
     write_json(optimizer_metadata_path(iter_root), metadata)
-    write_optimizer_iteration_sh(iter_root, cfg, grompp_log_path, config_path)
+    write_optimizer_iteration_sh(iter_root, cfg, opt_cfg, grompp_log_path, config_path)
     try:
         job_id = submit_sbatch(
             os.path.join(iter_root, "run_concentration_iteration.sh"),
@@ -919,9 +966,7 @@ def print_completed_summary(opt_cfg, completed_results):
         )
 
 
-def run_optimizer(config_path, auto_continue=False, dependency_job_id=None):
-    cfg = load_config(config_path)
-    opt_cfg = load_optimizer_config(cfg)
+def run_optimizer_target(cfg, config_path, opt_cfg, auto_continue=False, dependency_job_id=None):
     species_cfg = normalize_species_config(cfg["species"], inputs_dir=get_inputs_dir(cfg))
     group_defs, group_keys, active_species_keys = discover_groups(cfg, species_cfg)
     if opt_cfg.target_group not in group_keys:
@@ -1085,16 +1130,46 @@ def run_optimizer(config_path, auto_continue=False, dependency_job_id=None):
     )
 
 
+def run_optimizer(config_path, auto_continue=False, dependency_job_id=None, target_molarity_mol_l=None):
+    cfg = load_config(config_path)
+    optimizer_configs = load_optimizer_configs(cfg, target_molarity_filter=target_molarity_mol_l)
+    if len(optimizer_configs) > 1:
+        targets = ", ".join(f"{opt_cfg.target_molarity_mol_l:g}" for opt_cfg in optimizer_configs)
+        print(f"Running concentration optimizer for {len(optimizer_configs)} target molarities: {targets}")
+
+    exit_code = 0
+    for idx, opt_cfg in enumerate(optimizer_configs, start=1):
+        if len(optimizer_configs) > 1:
+            print(
+                "\n" + "=" * 100 + "\n"
+                f"Target molarity {idx}/{len(optimizer_configs)}: "
+                f"{opt_cfg.target_molarity_mol_l:.6f} mol/L\n"
+                + "=" * 100
+            )
+        result = run_optimizer_target(
+            cfg,
+            config_path,
+            opt_cfg,
+            auto_continue=auto_continue,
+            dependency_job_id=dependency_job_id,
+        )
+        if result != 0:
+            exit_code = result
+    return exit_code
+
+
 def cli_main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", nargs="?", default="config.toml")
     parser.add_argument("--auto-continue", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dependency-job-id", help=argparse.SUPPRESS)
+    parser.add_argument("--target-molarity-mol-l", type=float, help=argparse.SUPPRESS)
     args = parser.parse_args()
     sys.exit(
         run_optimizer(
             args.config,
             auto_continue=args.auto_continue,
             dependency_job_id=args.dependency_job_id,
+            target_molarity_mol_l=args.target_molarity_mol_l,
         )
     )

@@ -181,12 +181,15 @@ The generated template shows the full schema. The main sections are:
 
 The optional concentration optimizer is useful when you know the target molarity you want, but you do not yet know which input group weights will produce that molarity after density relaxation.
 
-It works on one selected case definition at a time:
+It works on one selected ratio/force-field/temperature definition at a time, with one or more target molarities:
 
 - one `[[screening.component_ratios]]` entry chosen by `concentration_optimizer.initial_ratio_name`
 - one `[[screening.force_field]]` entry chosen by `concentration_optimizer.force_field_name`
 - one temperature chosen by `concentration_optimizer.temperature`
 - one top-level formulation group chosen by `concentration_optimizer.target_group`
+- one or more target molarities from `concentration_optimizer.target_molarity_mol_l`
+
+When `target_molarity_mol_l` is a list, a normal `optimize_concentration.py` run prepares or advances each target independently. Each target uses its own optimizer root folder because the target molarity is included in the folder name.
 
 The optimizer keeps the target-group count fixed at `concentration_optimizer.reference_count`. It adjusts only the non-target group counts between iterations, preserving their relative proportions from the previous iteration. If the achieved molarity is above the target, it increases the non-target counts; if the achieved molarity is below the target, it decreases the non-target counts.
 
@@ -206,7 +209,7 @@ Suggested config block:
 [concentration_optimizer]
 enabled = true
 target_group = "LiFSI_salt"
-target_molarity_mol_l = 1.0
+target_molarity_mol_l = [0.5, 1.0, 1.5]
 tolerance_mol_l = 0.05
 max_iterations = 5
 reference_count = 150
