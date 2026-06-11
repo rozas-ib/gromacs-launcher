@@ -101,6 +101,7 @@ def run_relaunch(config_path, confirm=False, track_progress=False):
 
     for ctx, replica_idx, _row in candidates:
         ratio_entry = ctx.ratio_entry
+        sizing_entry = ctx.sizing_entry
         temp = ctx.temp
         active_itps = ctx.active_itps
         label = ctx.label
@@ -110,7 +111,15 @@ def run_relaunch(config_path, confirm=False, track_progress=False):
         job_log(f"Replica {replica_idx}: relaunch-failed mode selected this replica for recovery.")
         job_log(f"Replica {replica_idx}: aggregated grompp log path: {grompp_log_path}")
 
-        counts, sizing_info = resolve_system_size(cfg, species_cfg, order, group_defs, group_keys, ratio_entry["weights"])
+        counts, sizing_info = resolve_system_size(
+            cfg,
+            species_cfg,
+            order,
+            group_defs,
+            group_keys,
+            ratio_entry["weights"],
+            sizing_entry,
+        )
         prepare_replica_stage_inputs(rep_root, cfg, order, active_itps, species_cfg, counts, temp, label)
         build_initial_box_if_needed(
             rep_root,

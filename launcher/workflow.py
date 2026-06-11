@@ -70,6 +70,7 @@ def run_launch(config_path, dry_run=False, track_progress=False):
 
     for ctx in case_contexts:
         ratio_entry = ctx.ratio_entry
+        sizing_entry = ctx.sizing_entry
         temp = ctx.temp
         active_itps = ctx.active_itps
         ratio_name = ratio_entry["name"]
@@ -77,10 +78,21 @@ def run_launch(config_path, dry_run=False, track_progress=False):
         label = ctx.label
         sys_path = ctx.sys_path
         job_log, job_log_path = make_job_logger(sys_path, label)
-        job_log(f"Case details: ratio={ratio_name}, ff={ff_name}, temp={temp} K")
+        job_log(
+            f"Case details: ratio={ratio_name}, ff={ff_name}, temp={temp} K, "
+            f"{sizing_entry['field']}={sizing_entry['value']}"
+        )
         job_log(f"Log file path: {job_log_path}")
 
-        counts, sizing_info = resolve_system_size(cfg, species_cfg, order, group_defs, group_keys, ratio_entry["weights"])
+        counts, sizing_info = resolve_system_size(
+            cfg,
+            species_cfg,
+            order,
+            group_defs,
+            group_keys,
+            ratio_entry["weights"],
+            sizing_entry,
+        )
         job_log(
             "Resolved system size: "
             f"mode={sizing_info['mode']}, total_groups={sizing_info['n_total_components']}, "

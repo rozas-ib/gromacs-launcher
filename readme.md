@@ -293,7 +293,7 @@ solvent_1 = "dme_qforce_cm5_1.itp"
 solvent_2 = "tol_qforce_cm5_1.itp"
 ```
 
-Case directory names are generated from temperature, ratio-set name, force-field-set name, resolved group weights, and chosen ITP filenames.
+Case directory names are generated from temperature, ratio-set name, force-field-set name, screened size when applicable, resolved group weights, and chosen ITP filenames.
 
 ### System sizing
 
@@ -307,11 +307,15 @@ The launcher supports two sizing modes in `[system_sizing]`:
 - fixes one top-level group count with `reference_component_key`
 - uses `reference_component_count` as the anchor
 - allocates the remaining group counts to preserve the requested ratio weights
+- accepts a list such as `reference_component_count = [100, 150, 200]` to screen independent system sizes
 
 `target_atoms` mode:
 
 - estimates the total number of group units required to approach `target_atoms`
 - uses the atom count derived from each species GRO file
+- accepts a list such as `target_atoms = [8000, 12000, 16000]` to screen independent system sizes
+
+When the active sizing field is a list with more than one value, the launcher adds that size axis to the normal Cartesian product of component ratios, temperatures, force-field sets, and replicas. Size-screened case labels include a size suffix such as `atoms12000` or `ref150` so each system has its own output directory.
 
 Box size handling:
 

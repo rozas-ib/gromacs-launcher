@@ -12,6 +12,7 @@ class CaseContext:
     sys_path: str
     job_log_path: str
     ratio_entry: dict
+    sizing_entry: dict
     temp: float
     ff_entry: dict
     active_itps: dict
@@ -153,6 +154,52 @@ def normalize_force_field_sets(scr, species_keys):
     return out
 
 
+def normalize_sizing_variants(cfg):
+    sizing_cfg = cfg.get("system_sizing", {})
+    mode = sizing_cfg.get("mode", "target_atoms")
+    if mode == "reference_component":
+        if "reference_component_count" not in sizing_cfg:
+            raise KeyError("system_sizing.reference_component_count is required for mode='reference_component'")
+        counts = to_list(sizing_cfg["reference_component_count"])
+        variants = []
+        for idx, value in enumerate(counts, start=1):
+            count = int(value)
+            if count < 0:
+                raise ValueError("system_sizing.reference_component_count values must be >= 0")
+            variants.append(
+                {
+                    "name": f"ref{fmt_num(count)}",
+                    "mode": mode,
+                    "field": "reference_component_count",
+                    "value": count,
+                    "screened": len(counts) > 1,
+                    "index": idx,
+                }
+            )
+        return variants
+    if mode == "target_atoms":
+        if "target_atoms" not in sizing_cfg:
+            raise KeyError("system_sizing.target_atoms is required for mode='target_atoms'")
+        targets = to_list(sizing_cfg["target_atoms"])
+        variants = []
+        for idx, value in enumerate(targets, start=1):
+            target_atoms = int(value)
+            if target_atoms <= 0:
+                raise ValueError("system_sizing.target_atoms values must be > 0")
+            variants.append(
+                {
+                    "name": f"atoms{fmt_num(target_atoms)}",
+                    "mode": mode,
+                    "field": "target_atoms",
+                    "value": target_atoms,
+                    "screened": len(targets) > 1,
+                    "index": idx,
+                }
+            )
+        return variants
+    raise ValueError("system_sizing.mode must be one of: target_atoms, reference_component")
+
+
 def allocate_weighted_counts(n_total, composition):
     total_weight = sum(float(v) for v in composition.values())
     if total_weight <= 0:
@@ -200,17 +247,23 @@ def estimate_box_size_nm(total_atoms, project_cfg, sizing_cfg):
     return float(project_cfg["box_size_nm"]), "project_settings.box_size_nm"
 
 
-def resolve_system_size(cfg, species_cfg, order, group_defs, group_keys, component_ratio):
+def resolve_system_size(cfg, species_cfg, order, group_defs, group_keys, component_ratio, sizing_entry=None):
     project_cfg = cfg["project_settings"]
     sizing_cfg = cfg.get("system_sizing", {})
     mode = sizing_cfg.get("mode", "target_atoms")
+    if sizing_entry is None:
+        sizing_entry = normalize_sizing_variants(cfg)[0]
+    if sizing_entry["mode"] != mode:
+        raise ValueError(
+            f"Sizing variant mode '{sizing_entry['mode']}' does not match system_sizing.mode '{mode}'"
+        )
     total_ratio_weight = sum(float(v) for v in component_ratio.values())
     if total_ratio_weight <= 0:
         raise ValueError("Component ratio must contain positive total weight")
 
     if mode == "reference_component":
         ref_component_key = sizing_cfg["reference_component_key"]
-        ref_component_count = int(sizing_cfg["reference_component_count"])
+        ref_component_count = int(sizing_entry["value"])
         if ref_component_key not in group_keys:
             raise KeyError(
                 f"system_sizing.reference_component_key '{ref_component_key}' is not a valid component. "
@@ -226,7 +279,7 @@ def resolve_system_size(cfg, species_cfg, order, group_defs, group_keys, compone
         n_total_components = int(round(ref_component_count / ref_fraction))
         component_counts = allocate_weighted_counts(n_total_components, component_ratio)
     elif mode == "target_atoms":
-        target_atoms = int(sizing_cfg["target_atoms"])
+        target_atoms = int(sizing_entry["value"])
         if target_atoms <= 0:
             raise ValueError("system_sizing.target_atoms must be > 0")
         avg_component_atoms = 0.0
@@ -259,6 +312,10 @@ def resolve_system_size(cfg, species_cfg, order, group_defs, group_keys, compone
 
     return counts, {
         "mode": mode,
+        "sizing_name": sizing_entry["name"],
+        "sizing_field": sizing_entry["field"],
+        "sizing_value": sizing_entry["value"],
+        "sizing_screened": sizing_entry["screened"],
         "n_total_components": sum(group_counts.values()),
         "total_atoms": total_atoms,
         "box_size_nm": box_size_nm,
@@ -272,10 +329,11 @@ def fmt_num(value):
     return str(int(value)) if value.is_integer() else f"{value:.4g}"
 
 
-def build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, species_order, group_keys):
+def build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, species_order, group_keys, sizing_entry=None):
     comp_mix_label = "_".join(f"{k}{fmt_num(component_ratio[k])}" for k in group_keys)
     itp_label = "_".join(active_itps[k].split(".")[0] for k in species_order)
-    return f"T{fmt_num(temp)}_{ratio_name}_{ff_name}_{comp_mix_label}_{itp_label}"
+    size_label = f"_{sizing_entry['name']}" if sizing_entry and sizing_entry.get("screened") else ""
+    return f"T{fmt_num(temp)}_{ratio_name}_{ff_name}{size_label}_{comp_mix_label}_{itp_label}"
 
 
 def print_dry_run_case(label, temp, ratio_name, ff_name, counts, order, group_keys, component_ratio, active_itps, sizing_info):
@@ -284,6 +342,8 @@ def print_dry_run_case(label, temp, ratio_name, ff_name, counts, order, group_ke
     species_counts = ", ".join(f"{k}={counts[k]}" for k in order)
     print(f"{'=' * 100}\n[DRY-RUN] {label}\n{'=' * 100}")
     print(f"Temp={fmt_num(temp)} K\n Ratio={ratio_name}\n FF={ff_name}\n Component_ratio=({component_weights})")
+    if sizing_info.get("sizing_screened"):
+        print(f" Size_screen={sizing_info['sizing_field']}={fmt_num(sizing_info['sizing_value'])}")
     details = (
         f"Sizing_mode={sizing_info['mode']} -->  Total_groups={sizing_info['n_total_components']}, "
         f"box_nm={sizing_info['box_size_nm']:.3f} ({sizing_info['box_source']})"
@@ -318,12 +378,12 @@ def format_final_molar_ratio(component_counts, group_keys):
 
 def build_case_contexts(master_combos, order, group_keys, output_root):
     contexts = []
-    for ratio_entry, temp, ff_entry in master_combos:
+    for ratio_entry, sizing_entry, temp, ff_entry in master_combos:
         ratio_name = ratio_entry["name"]
         component_ratio = ratio_entry["weights"]
         ff_name = ff_entry["name"]
         active_itps = ff_entry["species_itps"]
-        label = build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, order, group_keys)
+        label = build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, order, group_keys, sizing_entry)
         sys_path = get_case_dir(output_root, label)
         contexts.append(
             CaseContext(
@@ -331,6 +391,7 @@ def build_case_contexts(master_combos, order, group_keys, output_root):
                 sys_path=sys_path,
                 job_log_path=os.path.join(sys_path, "launch.log"),
                 ratio_entry=ratio_entry,
+                sizing_entry=sizing_entry,
                 temp=temp,
                 ff_entry=ff_entry,
                 active_itps=active_itps,
@@ -342,6 +403,6 @@ def build_case_contexts(master_combos, order, group_keys, output_root):
 def build_master_combos(cfg, group_keys, species_order):
     scr = cfg["screening"]
     component_ratios = normalize_component_ratios(scr, group_keys)
+    sizing_variants = normalize_sizing_variants(cfg)
     force_field_sets = normalize_force_field_sets(scr, species_order)
-    return list(itertools.product(component_ratios, to_list(scr["target_temps"]), force_field_sets))
-
+    return list(itertools.product(component_ratios, sizing_variants, to_list(scr["target_temps"]), force_field_sets))

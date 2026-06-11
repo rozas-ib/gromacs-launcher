@@ -55,6 +55,8 @@ gmx_executable_path = "/apps/GPP/GROMACS/2024.2/INTEL24.2/IMPI21.13/bin/gmx_mpi"
 
 #mode = "target_atoms"
 #target_atoms = 12000
+# To screen independent system sizes in target_atoms mode, use a list:
+#target_atoms = [8000, 12000, 16000]
 #estimate_box_from_atoms = true # -> if set to true, insert-molecules will use this volume
 #atom_number_density_atoms_per_nm3 = 85.0
 
@@ -63,6 +65,8 @@ mode = "reference_component"
 # [groups.*] (example names are arbitrary):
 reference_component_key = "LiFSI_salt"    # or "ZnTFSI2_salt", "Solvents", etc.
 reference_component_count = 150
+# To screen independent system sizes in reference_component mode, use a list:
+#reference_component_count = [100, 150, 200]
 estimate_box_from_atoms = false # -> if set to true, insert-molecules will use this volume
 atom_number_density_atoms_per_nm3 = 85.0
 #
