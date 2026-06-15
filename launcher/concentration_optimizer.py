@@ -32,7 +32,7 @@ from .slurm import (
     submit_sbatch,
 )
 from .status_reporting import make_job_logger
-from .system_setup import build_initial_box_if_needed, rebuild_replica_grompp_log
+from .system_setup import build_initial_box_if_needed, build_topology_molecule_names, rebuild_replica_grompp_log
 
 AVOGADRO = 6.02214076e23
 
@@ -664,6 +664,7 @@ def iteration_stage_inputs(iter_root, cfg, species_order, active_itps, species_c
     npt_cfg = sim_cfg["conc_opt_npt"]
     template_dir = get_template_dir(cfg)
     inputs_dir = get_inputs_dir(cfg)
+    molecule_names = build_topology_molecule_names(inputs_dir, active_itps)
 
     for stage in stage_names:
         dest = os.path.join(iter_root, stage)
@@ -680,7 +681,7 @@ def iteration_stage_inputs(iter_root, cfg, species_order, active_itps, species_c
                 top.write(f'#include "{active_itps[key]}"\n')
             top.write(f"\n[ system ]\n{label}\n\n[ molecules ]\n")
             for key in species_order:
-                top.write(f"{species_cfg[key]['resname']:<15} {counts[key]}\n")
+                top.write(f"{molecule_names[key]:<15} {counts[key]}\n")
 
         if stage == "1_min":
             shutil.copy(f"{template_dir}/min.mdp", f"{dest}/min.mdp")

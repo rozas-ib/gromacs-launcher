@@ -53,10 +53,38 @@ def rebuild_replica_grompp_log(rep_root):
     return aggregate_path
 
 
+def parse_itp_moleculetype_name(itp_path):
+    in_moleculetype = False
+    with open(itp_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.split(";", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line.strip("[]").strip().lower()
+                if in_moleculetype:
+                    break
+                in_moleculetype = section == "moleculetype"
+                continue
+            if in_moleculetype:
+                return line.split()[0]
+    raise ValueError(
+        f"ITP file '{itp_path}' does not define a valid molecule name in its [ moleculetype ] section"
+    )
+
+
+def build_topology_molecule_names(inputs_dir, active_itps):
+    return {
+        species_key: parse_itp_moleculetype_name(os.path.join(inputs_dir, itp_name))
+        for species_key, itp_name in active_itps.items()
+    }
+
+
 def prepare_replica_stage_inputs(rep_root, cfg, order, active_itps, species_cfg, counts, temp, label):
     topology_include = cfg["project_settings"].get("topology_forcefield_include", "forcefield.itp")
     inputs_dir = get_inputs_dir(cfg)
     tdir = get_template_dir(cfg)
+    molecule_names = build_topology_molecule_names(inputs_dir, active_itps)
     for stage in ["1_min", "2_press", "3_anneal", "4_prod"]:
         dest = os.path.join(rep_root, stage)
         os.makedirs(dest, exist_ok=True)
@@ -72,7 +100,7 @@ def prepare_replica_stage_inputs(rep_root, cfg, order, active_itps, species_cfg,
                 top.write(f'#include "{active_itps[key]}"\n')
             top.write(f"\n[ system ]\n{label}\n\n[ molecules ]\n")
             for key in order:
-                top.write(f"{species_cfg[key]['resname']:<15} {counts[key]}\n")
+                top.write(f"{molecule_names[key]:<15} {counts[key]}\n")
 
         sim = cfg["simulation_settings"]
         if stage == "1_min":
