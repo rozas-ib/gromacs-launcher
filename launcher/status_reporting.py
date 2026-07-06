@@ -130,6 +130,76 @@ def stage_time_progress(stage_dir, mdp_name, deffnm, output_gro, fallback_nsteps
     }
 
 
+def read_existing_text(paths):
+    parts = []
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                parts.append(f.read())
+        except (OSError, ValueError):
+            continue
+    return "\n".join(parts)
+
+
+def has_gromacs_failure_message(content):
+    failure_patterns = [
+        r"\bfatal error\b",
+        r"\berror in user input\b",
+        r"\binconsistency in user input\b",
+        r"\bsegmentation fault\b",
+        r"\bfailed to\b",
+        r"\bfailed for\b",
+        r"\bbuild failed\b",
+        r"\bgrompp failed\b",
+        r"\bmdrun failed\b",
+        r"\bcannot\b",
+        r"\bcan not\b",
+        r"\bno such file\b",
+    ]
+    return any(re.search(pattern, content, re.IGNORECASE) for pattern in failure_patterns)
+
+
+def gromacs_status_from_log(log_paths, output_path):
+    content = read_existing_text(log_paths)
+    if content and has_gromacs_failure_message(content):
+        return "failed"
+    if os.path.exists(output_path):
+        return "succeed"
+    return "failed"
+
+
+def mdrun_finished_normally(stage_dir, deffnm, output_gro):
+    log_paths = [
+        os.path.join(stage_dir, f"{deffnm}.log"),
+        os.path.join(stage_dir, f"{deffnm}.err"),
+        os.path.join(stage_dir, f"{deffnm}.out"),
+    ]
+    content = read_existing_text(log_paths)
+    if content and has_gromacs_failure_message(content):
+        return "no"
+    if not os.path.exists(os.path.join(stage_dir, output_gro)):
+        return "no"
+    if ("Writing final coordinates." in content) or ("Finished mdrun" in content):
+        return "yes"
+    return "yes"
+
+
+def insert_molecule_status(min_dir):
+    return gromacs_status_from_log(
+        [os.path.join(min_dir, "insert-molecules.log")],
+        os.path.join(min_dir, "start.gro"),
+    )
+
+
+def grompp_status(stage_dir, log_name, tpr_name):
+    return gromacs_status_from_log(
+        [os.path.join(stage_dir, log_name)],
+        os.path.join(stage_dir, tpr_name),
+    )
+
+
 def parse_chunk_err_status(prod_dir, target_steps):
     completed_chunks = 0
     max_step = 0
@@ -215,21 +285,6 @@ def build_progress_row(case_label, rep_idx, rep_root, cfg, launch_log_path, slur
 
     target_steps = get_target_prod_steps(prod_dir, cfg)
     chunk_status = parse_chunk_err_status(prod_dir, target_steps)
-    min_progress = stage_time_progress(min_dir, "min.mdp", "min", "min_out.gro")
-    press_progress = stage_time_progress(
-        press_dir,
-        "press.mdp",
-        "press",
-        "press_out.gro",
-        fallback_nsteps=cfg["simulation_settings"]["press"]["nsteps"],
-    )
-    anneal_progress = stage_time_progress(
-        anneal_dir,
-        "anneal.mdp",
-        "anneal",
-        "anneal_out.gro",
-        fallback_nsteps=cfg["simulation_settings"]["anneal"]["nsteps"],
-    )
     prod_progress = production_time_progress(prod_dir, cfg, chunk_status)
     job_ids = parse_replica_job_ids(launch_log_path, rep_idx)
     tracked_job_id = job_ids["prod_job_id"] or job_ids["setup_job_id"]
@@ -247,26 +302,14 @@ def build_progress_row(case_label, rep_idx, rep_root, cfg, launch_log_path, slur
         "replica": rep_idx,
         "slurm_job_id": tracked_job_id or "",
         "slurm_status": slurm_status,
-        "insert_molecules": status_flag(os.path.exists(os.path.join(min_dir, "start.gro"))),
-        "grompp_min": status_flag(os.path.exists(os.path.join(min_dir, "min.tpr"))),
-        "min_run": status_flag(os.path.exists(os.path.join(min_dir, "min_out.gro"))),
-        "min_current_step": min_progress["current_step"],
-        "min_target_steps": min_progress["target_steps"],
-        "min_current_time_ps": min_progress["current_time_ps"],
-        "min_target_time_ps": min_progress["target_time_ps"],
-        "grompp_press": status_flag(os.path.exists(os.path.join(press_dir, "press.tpr"))),
-        "press_run": status_flag(os.path.exists(os.path.join(press_dir, "press_out.gro"))),
-        "press_current_step": press_progress["current_step"],
-        "press_target_steps": press_progress["target_steps"],
-        "press_current_time_ps": press_progress["current_time_ps"],
-        "press_target_time_ps": press_progress["target_time_ps"],
-        "grompp_anneal": status_flag(os.path.exists(os.path.join(anneal_dir, "anneal.tpr"))),
-        "anneal_run": status_flag(os.path.exists(os.path.join(anneal_dir, "anneal_out.gro"))),
-        "anneal_current_step": anneal_progress["current_step"],
-        "anneal_target_steps": anneal_progress["target_steps"],
-        "anneal_current_time_ps": anneal_progress["current_time_ps"],
-        "anneal_target_time_ps": anneal_progress["target_time_ps"],
-        "analysis_start_gro": status_flag(os.path.exists(os.path.join(prod_dir, "start.gro"))),
+        "insert_molecule": insert_molecule_status(min_dir),
+        "grompp_min": grompp_status(min_dir, "grompp_min.log", "min.tpr"),
+        "min_run": mdrun_finished_normally(min_dir, "min", "min_out.gro"),
+        "grompp_press": grompp_status(press_dir, "grompp_press.log", "press.tpr"),
+        "press_run": mdrun_finished_normally(press_dir, "press", "press_out.gro"),
+        "grompp_anneal": grompp_status(anneal_dir, "grompp_anneal.log", "anneal.tpr"),
+        "anneal_run": mdrun_finished_normally(anneal_dir, "anneal", "anneal_out.gro"),
+        "density_analysis": status_flag(os.path.exists(os.path.join(prod_dir, "start.gro"))),
         "grompp_prod": status_flag(os.path.exists(os.path.join(prod_dir, "nvt_run.tpr"))),
         "prod_checkpoint": status_flag(os.path.exists(os.path.join(prod_dir, "nvt_run.cpt"))),
         "prod_target_reached": status_flag(chunk_status["reached_target"]),
@@ -274,8 +317,6 @@ def build_progress_row(case_label, rep_idx, rep_root, cfg, launch_log_path, slur
         "prod_target_steps": prod_progress["target_steps"],
         "prod_current_time_ps": prod_progress["current_time_ps"],
         "prod_target_time_ps": prod_progress["target_time_ps"],
-        "max_step_seen": chunk_status["max_step"],
-        "target_steps": target_steps,
         "next_chunk_idx": max(chunk_status["next_chunk_idx"], get_next_unused_chunk_idx(prod_dir)),
     }
 
@@ -289,26 +330,14 @@ def write_progress_table(rows, output_dir):
         "replica",
         "slurm_job_id",
         "slurm_status",
-        "insert_molecules",
+        "insert_molecule",
         "grompp_min",
         "min_run",
-        "min_current_step",
-        "min_target_steps",
-        "min_current_time_ps",
-        "min_target_time_ps",
         "grompp_press",
         "press_run",
-        "press_current_step",
-        "press_target_steps",
-        "press_current_time_ps",
-        "press_target_time_ps",
         "grompp_anneal",
         "anneal_run",
-        "anneal_current_step",
-        "anneal_target_steps",
-        "anneal_current_time_ps",
-        "anneal_target_time_ps",
-        "analysis_start_gro",
+        "density_analysis",
         "grompp_prod",
         "prod_checkpoint",
         "prod_target_reached",
@@ -316,8 +345,6 @@ def write_progress_table(rows, output_dir):
         "prod_target_steps",
         "prod_current_time_ps",
         "prod_target_time_ps",
-        "max_step_seen",
-        "target_steps",
         "next_chunk_idx",
     ]
 
@@ -331,26 +358,14 @@ def write_progress_table(rows, output_dir):
         "replica": "replica",
         "slurm_job_id": "slurm job id",
         "slurm_status": "slurm status",
-        "insert_molecules": "insert-molecules",
+        "insert_molecule": "insert_molecule",
         "grompp_min": "grompp min",
         "min_run": "min run",
-        "min_current_step": "min step",
-        "min_target_steps": "min target steps",
-        "min_current_time_ps": "min time ps",
-        "min_target_time_ps": "min target ps",
         "grompp_press": "grompp press",
         "press_run": "press run",
-        "press_current_step": "press step",
-        "press_target_steps": "press target steps",
-        "press_current_time_ps": "press time ps",
-        "press_target_time_ps": "press target ps",
         "grompp_anneal": "grompp anneal",
         "anneal_run": "anneal run",
-        "anneal_current_step": "anneal step",
-        "anneal_target_steps": "anneal target steps",
-        "anneal_current_time_ps": "anneal time ps",
-        "anneal_target_time_ps": "anneal target ps",
-        "analysis_start_gro": "analysis/start.gro",
+        "density_analysis": "density_analysis",
         "grompp_prod": "grompp prod",
         "prod_checkpoint": "prod cpt",
         "prod_target_reached": "target steps reached",
@@ -358,8 +373,6 @@ def write_progress_table(rows, output_dir):
         "prod_target_steps": "prod target steps",
         "prod_current_time_ps": "prod time ps",
         "prod_target_time_ps": "prod target ps",
-        "max_step_seen": "max step seen",
-        "target_steps": "target steps",
         "next_chunk_idx": "next chunk",
     }
     with open(md_path, "w", encoding="utf-8") as md_file:

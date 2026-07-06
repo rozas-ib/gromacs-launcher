@@ -381,7 +381,24 @@ def collect_slurm_status_map(job_ids):
     return status_map
 
 
-def submit_sbatch(script_path, dependency_job_id=None):
+def log_sbatch_result(log_fn, cmd, returncode=None, stdout="", stderr="", error_message=None):
+    if log_fn is None:
+        return
+    lines = ["sbatch submission", f"command: {' '.join(cmd)}"]
+    if returncode is not None:
+        lines.append(f"returncode: {returncode}")
+    if stdout:
+        lines.append("stdout:")
+        lines.extend(stdout.rstrip().splitlines())
+    if stderr:
+        lines.append("stderr:")
+        lines.extend(stderr.rstrip().splitlines())
+    if error_message:
+        lines.append(f"error: {error_message}")
+    log_fn("\n".join(lines))
+
+
+def submit_sbatch(script_path, dependency_job_id=None, log_fn=None):
     cmd = ["sbatch", "--parsable"]
     if dependency_job_id:
         cmd.append(f"--dependency=afterany:{dependency_job_id}")
@@ -389,10 +406,12 @@ def submit_sbatch(script_path, dependency_job_id=None):
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except OSError as exc:
+        log_sbatch_result(log_fn, cmd, error_message=str(exc))
         raise RuntimeError(f"Failed to execute sbatch for '{script_path}': {exc}") from exc
 
     stdout = (res.stdout or "").strip()
     stderr = (res.stderr or "").strip()
+    log_sbatch_result(log_fn, cmd, res.returncode, stdout, stderr)
     if res.returncode != 0:
         raise RuntimeError(
             f"sbatch failed for '{script_path}' with return code {res.returncode}. stderr: {stderr or '[empty]'}"

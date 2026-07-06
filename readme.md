@@ -262,7 +262,28 @@ Groups are defined under `[groups.*]` and reference species names:
 stoichiometric_ratio = { cation = 1, anion = 1 }
 ```
 
-Formulation ratios are expressed between groups, not directly between species.
+Each group is a concrete molecular building block. Its `stoichiometric_ratio` is not
+normalized as a molar-ratio label; it says how many molecules of each species are
+contained in one group unit.
+
+For example, these two solvent groups have the same internal 1:1 solvent ratio,
+but they are not equivalent to the launcher:
+
+```toml
+[groups.Solvent_pair]
+stoichiometric_ratio = { solvent_1 = 1, solvent_2 = 1 }
+
+[groups.Solvent_block]
+stoichiometric_ratio = { solvent_1 = 5, solvent_2 = 5 }
+```
+
+`Solvent_pair` contains 2 molecules per group unit, while `Solvent_block`
+contains 10 molecules per group unit. A `[[screening.component_ratios]]` entry
+weights complete group units, so the same component weight produces different
+absolute molecule counts for these two group definitions.
+
+Formulation ratios are therefore expressed between complete groups, not directly
+between normalized species fractions.
 
 ### Screening logic
 
@@ -433,26 +454,14 @@ The progress table is generated on every launcher run and summarizes each case/r
 
 - `slurm job id`
 - `slurm status`
-- `insert-molecules`
+- `insert_molecule`
 - `grompp min`
 - `min run`
-- `min step`
-- `min target steps`
-- `min time ps`
-- `min target ps`
 - `grompp press`
 - `press run`
-- `press step`
-- `press target steps`
-- `press time ps`
-- `press target ps`
 - `grompp anneal`
 - `anneal run`
-- `anneal step`
-- `anneal target steps`
-- `anneal time ps`
-- `anneal target ps`
-- `analysis/start.gro`
+- `density_analysis`
 - `grompp prod`
 - `prod cpt`
 - `target steps reached`
@@ -460,8 +469,6 @@ The progress table is generated on every launcher run and summarizes each case/r
 - `prod target steps`
 - `prod time ps`
 - `prod target ps`
-- `max step seen`
-- `target steps`
 - `next chunk`
 
 The launcher now also tries to populate the Slurm columns from the most recent known job id for each replica:

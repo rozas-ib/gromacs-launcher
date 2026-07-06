@@ -931,6 +931,7 @@ def prepare_iteration(
         job_id = submit_sbatch(
             os.path.join(iter_root, "run_concentration_iteration.sh"),
             dependency_job_id=dependency_job_id,
+            log_fn=job_log,
         )
     except RuntimeError as exc:
         job_log(f"Iteration {iter_idx}: ERROR submitting concentration optimization job: {exc}")

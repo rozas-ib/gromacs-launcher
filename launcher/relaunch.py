@@ -77,7 +77,7 @@ def run_relaunch(config_path, confirm=False, track_progress=False):
             print(
                 f"- {ctx.label} R{replica_idx}: "
                 f"slurm_status={row['slurm_status']}, "
-                f"setup_ready={row['analysis_start_gro']}, "
+                f"setup_ready={row['density_analysis']}, "
                 f"prod_target_reached={row['prod_target_reached']}, "
                 f"next_chunk={row['next_chunk_idx']}"
             )
@@ -145,7 +145,10 @@ def run_relaunch(config_path, confirm=False, track_progress=False):
         if not setup_done:
             write_setup_sh(rep_root, cfg, rep_root, grompp_log_path)
             try:
-                setup_job_id = submit_sbatch(os.path.join(rep_root, "run_setup.sh"))
+                setup_job_id = submit_sbatch(
+                    os.path.join(rep_root, "run_setup.sh"),
+                    log_fn=job_log,
+                )
             except RuntimeError as exc:
                 job_log(f"Replica {replica_idx}: ERROR submitting setup job during relaunch: {exc}")
                 print(f"ERROR submitting setup job for {label} R{replica_idx}: {exc}")
@@ -172,6 +175,7 @@ def run_relaunch(config_path, confirm=False, track_progress=False):
                 prev = submit_sbatch(
                     os.path.join(rep_root, f"run_prod_{chunk_idx}.sh"),
                     dependency_job_id=prev,
+                    log_fn=job_log,
                 )
             except RuntimeError as exc:
                 job_log(f"Replica {replica_idx}: ERROR submitting production chunk {chunk_idx} during relaunch: {exc}")

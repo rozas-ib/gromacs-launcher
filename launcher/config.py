@@ -161,6 +161,12 @@ gro = "tol.gro"
 # One unit of the LiFSI salt group contains:
 stoichiometric_ratio = { cation = 1, anion = 1 }
 
+# Groups are concrete molecular building blocks, not normalized molar-ratio labels.
+# The coefficients below say how many molecules are placed in each group unit.
+# Therefore { solvent_1 = 1, solvent_2 = 1 } and { solvent_1 = 5, solvent_2 = 5 }
+# have the same internal 1:1 species ratio, but they are not the same group:
+# the first group contains 2 molecules per unit, while the second contains 10.
+# [[screening.component_ratios]] then weights these complete group units.
 [groups.DME_solv]
 stoichiometric_ratio = { solvent_1 = 1 }
 

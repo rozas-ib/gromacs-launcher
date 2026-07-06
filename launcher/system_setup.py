@@ -1,4 +1,5 @@
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -156,22 +157,25 @@ def build_initial_box_if_needed(rep_root, label, counts, order, species_cfg, gmx
     with open(ins_log_abs, "w", encoding="utf-8") as log_file:
         log_file.write("=== BOX LOG ===\n")
 
+    added_species_idx = 0
     for key in order:
         if counts[key] <= 0:
             with open(ins_log_abs, "a", encoding="utf-8") as log_file:
                 log_file.write(f"\n--- Skipping {key} (nmol=0) ---\n")
             job_log(f"Replica {replica_idx}: skipped species '{key}' during insert-molecules (nmol=0).")
             continue
+        seed = random.randint((added_species_idx * 100) + 1, (added_species_idx + 1) * 100)
+        added_species_idx += 1
         out = f"tmp_{key}_{replica_idx}.gro"
         cmd = (
             f"mpirun -np 1 {gmx_path} insert-molecules "
             f"{'-box ' + str(box) + ' ' + str(box) + ' ' + str(box) if curr is None else '-f ' + curr} "
-            f"-ci {os.path.join(min_dir, species_cfg[key]['gro'])} -nmol {counts[key]} -o {out} -seed {replica_idx * 123}"
+            f"-ci {os.path.join(min_dir, species_cfg[key]['gro'])} -nmol {counts[key]} -o {out} -seed {seed}"
         )
-        job_log(f"Replica {replica_idx}: insert-molecules for '{key}' (nmol={counts[key]}).")
+        job_log(f"Replica {replica_idx}: insert-molecules for '{key}' (nmol={counts[key]}, seed={seed}).")
         res = subprocess.run(cmd.split(), capture_output=True, text=True)
         with open(ins_log_abs, "a", encoding="utf-8") as log_file:
-            log_file.write(f"\n--- Adding {key} ---\n{res.stdout}{res.stderr}")
+            log_file.write(f"\n--- Adding {key} (seed={seed}) ---\n{res.stdout}{res.stderr}")
         if not os.path.exists(out):
             print(f"FAILED build for {label}. Check {ins_log_abs}")
             sys.exit(1)
