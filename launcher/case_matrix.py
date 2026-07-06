@@ -330,10 +330,8 @@ def fmt_num(value):
 
 
 def build_case_label(temp, ratio_name, ff_name, component_ratio, active_itps, species_order, group_keys, sizing_entry=None):
-    comp_mix_label = "_".join(f"{k}{fmt_num(component_ratio[k])}" for k in group_keys)
-    itp_label = "_".join(active_itps[k].split(".")[0] for k in species_order)
     size_label = f"_{sizing_entry['name']}" if sizing_entry and sizing_entry.get("screened") else ""
-    return f"T{fmt_num(temp)}_{ratio_name}_{ff_name}{size_label}_{comp_mix_label}_{itp_label}"
+    return f"T{fmt_num(temp)}_{ratio_name}_{ff_name}{size_label}"
 
 
 def print_dry_run_case(label, temp, ratio_name, ff_name, counts, order, group_keys, component_ratio, active_itps, sizing_info):

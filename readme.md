@@ -293,7 +293,7 @@ solvent_1 = "dme_qforce_cm5_1.itp"
 solvent_2 = "tol_qforce_cm5_1.itp"
 ```
 
-Case directory names are generated from temperature, ratio-set name, force-field-set name, screened size when applicable, resolved group weights, and chosen ITP filenames.
+Case directory names are generated from temperature, ratio-set name, force-field-set name, and screened size when applicable.
 
 ### System sizing
 
