@@ -113,7 +113,6 @@ def plot_density(df, stationary_start, average_density, within_range_indices, be
 
     # Bottom left subplot for rolling standard deviation
     ax2 = plt.subplot(gs[1, 0])
-    ax2.set_yscale("log")
     ax2.plot(df['Time'], df['Mean Change Distance'], color='blue', label='Mean Change Distance', zorder=3)
     ax2.plot(df['Time'], df['EMA of Mean Change Distance'], color='orange', label='EMA', zorder=4)
     ax2.axhline(y=mean_threshold, color="gray", linestyle='--', label=f'Threshold value: {mean_threshold}', zorder=4)
@@ -125,12 +124,31 @@ def plot_density(df, stationary_start, average_density, within_range_indices, be
     
     # Bottom right subplot for the histogram
     ax3 = plt.subplot(gs[1, 1])
-    bins = np.logspace(np.log10(df['EMA of Mean Change Distance'].min()), np.log10(df['EMA of Mean Change Distance'].max()), 30)
-    ax3.hist(df['EMA of Mean Change Distance'], bins=bins, edgecolor='black', rwidth=0.7)
+    ema_changes = df['EMA of Mean Change Distance'].dropna()
+    positive_ema_changes = ema_changes[ema_changes > 0]
+
+    # Logarithmic axes and bins cannot represent zero.  Use them only when
+    # every plotted value is positive; otherwise retain a linear scale so
+    # stationary data (where a change can be exactly zero) remains plottable.
+    use_log_scale = (
+        not positive_ema_changes.empty
+        and len(positive_ema_changes) == len(ema_changes)
+        and positive_ema_changes.max() / positive_ema_changes.min() > 100
+    )
+    if use_log_scale:
+        ax2.set_yscale('log')
+        bins = np.logspace(
+            np.log10(positive_ema_changes.min()),
+            np.log10(positive_ema_changes.max()),
+            30,
+        )
+        ax3.set_xscale('log')
+    else:
+        bins = 30
+
+    ax3.hist(ema_changes, bins=bins, edgecolor='black', rwidth=0.7)
     ax3.set_xlabel('EMA Mean Change Distance')
     ax3.set_title('Histogram of EMA')
-    if df['Mean Change Distance'].max() / df['Mean Change Distance'].min() > 100:
-        ax3.set_xscale('log')
 
     plt.tight_layout()
     plt.savefig(os.path.join(file_dir, 'density_analysis.png'))
