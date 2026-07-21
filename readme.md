@@ -191,6 +191,8 @@ It works on one selected ratio/force-field/temperature definition at a time, wit
 
 When `target_molarity_mol_l` is a list, a normal `optimize_concentration.py` run prepares or advances each target independently. Each target uses its own optimizer root folder because the target molarity is included in the folder name.
 
+To optimize multiple starting component ratios, use a separate TOML configuration file for each `initial_ratio_name`. Separate files are important because continuation jobs reread their original configuration. The output directories will remain independent because the ratio name is included in each optimizer path.
+
 The optimizer keeps the target-group count fixed at `concentration_optimizer.reference_count`. It adjusts only the non-target group counts between iterations, preserving their relative proportions from the previous iteration. If the achieved molarity is above the target, it increases the non-target counts; if the achieved molarity is below the target, it decreases the non-target counts.
 
 For every optimizer iteration, the `1_min/start.gro` insertion box uses the artificial cubic size from `concentration_optimizer.box_size_nm`. This is intentionally separate from the physical target volume used to estimate molecule counts from `reference_count`, `target_molarity_mol_l`, and `initial_density_guess_kg_m3`.
