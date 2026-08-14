@@ -4,6 +4,12 @@ emtol       = 1.0            ; Stop minimization when the maximum force < 1.0 kJ
 emstep      = 0.001          ; Minimization step size
 nsteps      = 1000           ; Maximum number of (minimization) steps to perform
 
+; Output control (the minimization only needs its final .gro structure)
+nstxout                 = 0  ; disable full-precision coordinate trajectory (.trr)
+nstvout                 = 0  ; disable velocity trajectory output (.trr)
+nstfout                 = 0  ; disable force trajectory output (.trr)
+nstxout-compressed      = 0  ; do not write a trajectory during minimization
+
 ; Parameters describing how to find the neighbors of each atom and how to calculate the interactions
 nstlist         = 10          ; Frequency to update the neighbor list and long range forces
 cutoff-scheme   = Verlet     ; Buffered neighbor searching

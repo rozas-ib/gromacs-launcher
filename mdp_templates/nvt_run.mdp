@@ -5,9 +5,10 @@ integrator              = md-vv     ; integrator
 nsteps                  = 500000    ; 2 * 100000000 = 200000 ps
 dt                      = 0.002     ; 2 fs
 ; Output control
-;nstxout                = 1000    ; save coordinates every 2 ps (1000 steps)
-nstvout                 = 1000       ; save velocities every 2 ps (1000 steps)
-nstxout-compressed 	= 5000     ; save coordinates every 2 ps (1000 steps)
+nstxout                 = 0        ; disable full-precision coordinate trajectory (.trr)
+nstvout                 = 0        ; disable velocity trajectory output (.trr)
+nstfout                 = 0        ; disable force trajectory output (.trr)
+nstxout-compressed      = 5000     ; save compressed coordinates to .xtc every 10 ps
 nstcalcenergy 		= 100
 nstenergy               = 100       ; save energies every 0.2 ps (100 steps)
 nstlog                  = 5000       ; update log file every 2 ps (1000 steps)

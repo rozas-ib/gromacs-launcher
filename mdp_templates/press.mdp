@@ -5,8 +5,10 @@ integrator              = md        ; leap-frog integrator
 nsteps                  = 1500    ; 2 * 150000 = 300 ps
 dt                      = 0.002     ; 2 fs
 ; Output control
-nstxout-compressed      = 300        ; save coordinates every 1 ps (500 steps)
-nstvout                 = 300        ; save coordinates every 1 ps (500 steps)
+nstxout                 = 0          ; disable full-precision coordinate trajectory (.trr)
+nstvout                 = 0          ; disable velocity trajectory output (.trr)
+nstfout                 = 0          ; disable force trajectory output (.trr)
+nstxout-compressed      = 300        ; save compressed coordinates to .xtc
 nstenergy               = 300        ; save coordinates every 1 ps (500 steps)
 nstlog                  = 300        ; save coordinates every 1 ps (500 steps)
 ; Bond parameters
@@ -43,4 +45,3 @@ refcoord_scaling        = com
 pbc                     = xyz       ; 3-D PBC
 ; Velocity generation
 gen_vel                 = no        ; Velocity generation is off 
-
