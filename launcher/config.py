@@ -227,7 +227,8 @@ reference_count = 150
 box_size_nm = 10.0
 initial_ratio_name = "ratio_1"
 force_field_name = "ff_set1"
-temperature = 298.15
+# A scalar remains valid; a list runs every concentration x temperature condition.
+temperature = [298.15, 323.15]
 output_subdir = "concentration_optimizer"
 density_average_fraction = 0.2
 max_weight_change_factor = 3.0

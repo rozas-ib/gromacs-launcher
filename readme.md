@@ -207,15 +207,17 @@ The generated template shows the full schema. The main sections are:
 
 The optional concentration optimizer is useful when you know the target molarity you want, but you do not yet know which input group weights will produce that molarity after density relaxation.
 
-It works on one selected ratio/force-field/temperature definition at a time, with one or more target molarities:
+It works on one selected ratio and force-field definition with one or more target molarities and temperatures:
 
 - one `[[screening.component_ratios]]` entry chosen by `concentration_optimizer.initial_ratio_name`
 - one `[[screening.force_field]]` entry chosen by `concentration_optimizer.force_field_name`
-- one temperature chosen by `concentration_optimizer.temperature`
+- one or more temperatures from `concentration_optimizer.temperature`
 - one top-level formulation group chosen by `concentration_optimizer.target_group`
 - one or more target molarities from `concentration_optimizer.target_molarity_mol_l`
 
-When `target_molarity_mol_l` is a list, a normal `optimize_concentration.py` run prepares or advances each target independently. Each target uses its own optimizer root folder because the target molarity is included in the folder name.
+When molarity and temperature are lists, a normal `optimize_concentration.py` run prepares or advances their
+Cartesian product independently. Each condition uses its own folder containing both molarity and temperature.
+The scalar forms remain supported for backward compatibility.
 
 To optimize multiple starting component ratios, use a separate TOML configuration file for each `initial_ratio_name`. Separate files are important because continuation jobs reread their original configuration. The output directories will remain independent because the ratio name is included in each optimizer path.
 
@@ -244,13 +246,24 @@ reference_count = 150
 box_size_nm = 10.0
 initial_ratio_name = "ratio_1"
 force_field_name = "ff_set1"
-temperature = 298.15
+temperature = [298.15, 323.15]
 output_subdir = "concentration_optimizer"
 density_average_fraction = 0.2
 max_weight_change_factor = 3.0
 ```
 
+After conditions converge, the optimizer writes
+`concentration_optimizer/launcher_optimized_conditions.toml`. It contains ready-to-copy
+`[[screening.component_ratios]]` entries with a unique condition name and `target_temps = [T]`. The launcher
+honors this optional per-ratio temperature restriction, preventing ratios optimized at one temperature from
+being combined with every global `screening.target_temps` value. Ratio entries without `target_temps` retain
+the original global Cartesian-product behavior.
+
 The optimizer uses the existing `min.mdp` plus two dedicated config-driven sections for the pre-launch relaxation workflow:
+
+For optimizer runs, `ref_t` is set from the active `concentration_optimizer.temperature` condition. Any
+`ref_t` shown in the stage sections is therefore a fallback/documentation value rather than a temperature
+override.
 
 ```toml
 [simulation_settings.conc_opt_press]

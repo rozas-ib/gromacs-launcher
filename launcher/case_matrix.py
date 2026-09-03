@@ -114,13 +114,19 @@ def normalize_component_ratios(scr, component_keys):
         if not isinstance(comp, dict):
             raise ValueError("Each screening.component_ratios entry must be a table")
         entry_name = comp.get("name", f"ratio_{idx}")
-        unknown = [k for k in comp if k not in component_keys and k != "name"]
+        metadata_keys = {"name", "target_temps"}
+        unknown = [k for k in comp if k not in component_keys and k not in metadata_keys]
         if unknown:
             raise KeyError(f"Unknown component keys in ratio: {', '.join(unknown)}")
         weights = {k: float(comp.get(k, 0.0)) for k in component_keys}
         if sum(weights.values()) <= 0:
             raise ValueError("Each component ratio entry must have positive total weight")
-        out.append({"name": str(entry_name), "weights": weights})
+        target_temps = comp.get("target_temps")
+        if target_temps is not None:
+            target_temps = [float(value) for value in to_list(target_temps)]
+            if not target_temps:
+                raise ValueError("screening.component_ratios.target_temps must not be empty")
+        out.append({"name": str(entry_name), "weights": weights, "target_temps": target_temps})
     return out
 
 
@@ -403,4 +409,9 @@ def build_master_combos(cfg, group_keys, species_order):
     component_ratios = normalize_component_ratios(scr, group_keys)
     sizing_variants = normalize_sizing_variants(cfg)
     force_field_sets = normalize_force_field_sets(scr, species_order)
-    return list(itertools.product(component_ratios, sizing_variants, to_list(scr["target_temps"]), force_field_sets))
+    combos = []
+    global_temperatures = [float(value) for value in to_list(scr["target_temps"])]
+    for ratio_entry in component_ratios:
+        temperatures = ratio_entry.get("target_temps") or global_temperatures
+        combos.extend(itertools.product([ratio_entry], sizing_variants, temperatures, force_field_sets))
+    return combos

@@ -97,7 +97,27 @@ def parse_target_molarities(raw):
     return targets
 
 
-def load_optimizer_configs(cfg, target_molarity_filter=None):
+def parse_optimizer_temperatures(raw):
+    value = raw["temperature"]
+    values = value if isinstance(value, list) else [value]
+    if not values:
+        raise ValueError("concentration_optimizer.temperature must contain at least one value")
+    temperatures = []
+    seen = set()
+    for item in values:
+        temperature = float(item)
+        if temperature <= 0:
+            raise ValueError("concentration_optimizer.temperature values must be > 0")
+        if temperature in seen:
+            raise ValueError(
+                f"concentration_optimizer.temperature contains duplicate value {temperature:g}"
+            )
+        seen.add(temperature)
+        temperatures.append(temperature)
+    return temperatures
+
+
+def load_optimizer_configs(cfg, target_molarity_filter=None, temperature_filter=None):
     raw = cfg.get("concentration_optimizer")
     if not isinstance(raw, dict) or not raw.get("enabled", False):
         raise ValueError(
@@ -109,6 +129,7 @@ def load_optimizer_configs(cfg, target_molarity_filter=None):
             "concentration_optimizer.box_size_nm must be set to the artificial insertion/minimization box size"
         )
     target_molarities = parse_target_molarities(raw)
+    temperatures = parse_optimizer_temperatures(raw)
     if target_molarity_filter is not None:
         requested = float(target_molarity_filter)
         target_molarities = [
@@ -120,6 +141,16 @@ def load_optimizer_configs(cfg, target_molarity_filter=None):
                 "Requested target molarity "
                 f"{requested:g} is not listed in concentration_optimizer.target_molarity_mol_l"
             )
+    if temperature_filter is not None:
+        requested = float(temperature_filter)
+        temperatures = [
+            temperature for temperature in temperatures
+            if math.isclose(temperature, requested, rel_tol=0.0, abs_tol=1e-12)
+        ]
+        if not temperatures:
+            raise ValueError(
+                f"Requested temperature {requested:g} is not listed in concentration_optimizer.temperature"
+            )
 
     common = {
         "target_group": str(raw["target_group"]),
@@ -129,7 +160,6 @@ def load_optimizer_configs(cfg, target_molarity_filter=None):
         "box_size_nm": float(raw["box_size_nm"]),
         "initial_ratio_name": str(raw["initial_ratio_name"]),
         "force_field_name": str(raw["force_field_name"]),
-        "temperature": float(raw["temperature"]),
         "output_subdir": str(raw.get("output_subdir", "concentration_optimizer")),
         "density_average_fraction": float(raw.get("density_average_fraction", 0.2)),
         "max_weight_change_factor": float(raw.get("max_weight_change_factor", 3.0)),
@@ -166,9 +196,11 @@ def load_optimizer_configs(cfg, target_molarity_filter=None):
     return [
         ConcentrationOptimizerConfig(
             target_molarity_mol_l=target_molarity,
+            temperature=temperature,
             **common,
         )
         for target_molarity in target_molarities
+        for temperature in temperatures
     ]
 
 
@@ -176,7 +208,7 @@ def load_optimizer_config(cfg):
     configs = load_optimizer_configs(cfg)
     if len(configs) != 1:
         raise ValueError(
-            "concentration_optimizer.target_molarity_mol_l contains multiple values; "
+            "concentration_optimizer contains multiple molarity/temperature conditions; "
             "use load_optimizer_configs for multi-target workflows"
         )
     return configs[0]
@@ -690,7 +722,7 @@ def iteration_stage_inputs(iter_root, cfg, species_order, active_itps, species_c
                 f"{template_dir}/press.mdp",
                 f"{dest}/press.mdp",
                 {
-                    "ref_t": press_cfg["ref_t"],
+                    "ref_t": temp,
                     "nsteps": press_cfg["nsteps"],
                     "dt": press_cfg["dt"],
                     "ref_p": press_cfg["ref_p"],
@@ -701,7 +733,7 @@ def iteration_stage_inputs(iter_root, cfg, species_order, active_itps, species_c
                 f"{template_dir}/npt.mdp",
                 f"{dest}/npt.mdp",
                 {
-                    "ref_t": npt_cfg.get("ref_t", temp),
+                    "ref_t": temp,
                     "nsteps": npt_cfg["nsteps"],
                     "dt": npt_cfg["dt"],
                     "ref_p": npt_cfg["ref_p"],
@@ -780,7 +812,7 @@ fi
 append_stage_log "$(basename "$BASE") | 3_npt/grompp_npt.log" "$BASE/3_npt/grompp_npt.log"
 {shell_join([mdrun_launcher, "$GMX", "mdrun -deffnm npt -c npt_out.gro -pin on", mdrun_extra_args])}
 
-python3 "{optimizer_entrypoint}" "{config_path}" --auto-continue --dependency-job-id "$SLURM_JOB_ID" --target-molarity-mol-l "{opt_cfg.target_molarity_mol_l:.17g}"
+python3 "{optimizer_entrypoint}" "{config_path}" --auto-continue --dependency-job-id "$SLURM_JOB_ID" --target-molarity-mol-l "{opt_cfg.target_molarity_mol_l:.17g}" --temperature "{opt_cfg.temperature:.17g}"
 """
     with open(os.path.join(iter_root, "run_concentration_iteration.sh"), "w", encoding="utf-8") as f:
         f.write(script_content)
@@ -842,8 +874,18 @@ def load_completed_iteration(cfg, opt_cfg, iter_root):
     )
 
 
-def render_ratio_snippet(component_ratio):
+def ratio_condition_name(opt_cfg):
+    return (
+        f"{opt_cfg.initial_ratio_name}_{opt_cfg.target_molarity_mol_l:.12g}M_"
+        f"T{opt_cfg.temperature:.12g}K"
+    )
+
+
+def render_ratio_snippet(component_ratio, opt_cfg=None):
     lines = ["[[screening.component_ratios]]"]
+    if opt_cfg is not None:
+        lines.append(f'name = "{ratio_condition_name(opt_cfg)}"')
+        lines.append(f"target_temps = [{opt_cfg.temperature:.8g}]")
     for key, value in component_ratio.items():
         lines.append(f'{key} = {value:.8g}')
     return "\n".join(lines)
@@ -1001,6 +1043,7 @@ def run_optimizer_target(cfg, config_path, opt_cfg, auto_continue=False, depende
         payload = {
             "target_group": opt_cfg.target_group,
             "target_molarity_mol_l": opt_cfg.target_molarity_mol_l,
+            "temperature": opt_cfg.temperature,
             "tolerance_mol_l": opt_cfg.tolerance_mol_l,
             "converged_iteration": converged.iteration_idx,
             "observed_molarity_mol_l": converged.observed_molarity_mol_l,
@@ -1009,13 +1052,13 @@ def run_optimizer_target(cfg, config_path, opt_cfg, auto_continue=False, depende
             "selected_frame_volume_nm3": converged.selected_frame_volume_nm3,
             "component_ratio": converged.component_ratio,
             "group_counts": converged.group_counts,
-            "screening_component_ratio_snippet": render_ratio_snippet(converged.component_ratio),
+            "screening_component_ratio_snippet": render_ratio_snippet(converged.component_ratio, opt_cfg),
         }
         write_json(completed_result_path(opt_root), payload)
         print("\nTarget molarity reached within tolerance.")
         print(f"Optimized ratio file written to {completed_result_path(opt_root)}")
         print("\nSuggested [[screening.component_ratios]] snippet:\n")
-        print(render_ratio_snippet(converged.component_ratio))
+        print(render_ratio_snippet(converged.component_ratio, opt_cfg))
         return 0
 
     if len(completed_results) >= opt_cfg.max_iterations:
@@ -1030,7 +1073,7 @@ def run_optimizer_target(cfg, config_path, opt_cfg, auto_continue=False, depende
                 f"(error {best.error_mol_l:+.6f} mol/L)."
             )
             print("\nClosest [[screening.component_ratios]] snippet:\n")
-            print(render_ratio_snippet(best.component_ratio))
+            print(render_ratio_snippet(best.component_ratio, opt_cfg))
         return 0 if auto_continue else 1
 
     existing_indices = completed_iteration_indices(opt_root)
@@ -1140,20 +1183,68 @@ def run_optimizer_target(cfg, config_path, opt_cfg, auto_continue=False, depende
     )
 
 
-def run_optimizer(config_path, auto_continue=False, dependency_job_id=None, target_molarity_mol_l=None):
+def write_launcher_conditions(cfg, optimizer_configs):
+    output_root = get_output_root(cfg)
+    output_dir = os.path.join(
+        output_root,
+        str(cfg["concentration_optimizer"].get("output_subdir", "concentration_optimizer")),
+    )
+    species_cfg = normalize_species_config(cfg["species"], inputs_dir=get_inputs_dir(cfg))
+    _, group_keys, order = discover_groups(cfg, species_cfg)
+    completed = []
+    for opt_cfg in optimizer_configs:
+        case_ctx = resolve_optimizer_case(cfg, opt_cfg, group_keys, order)
+        result_path = completed_result_path(optimizer_root_dir(output_root, opt_cfg, case_ctx))
+        if os.path.exists(result_path):
+            completed.append((opt_cfg, read_json(result_path)))
+    if not completed:
+        return None
+
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, "launcher_optimized_conditions.toml")
+    with open(path, "w", encoding="utf-8") as output_file:
+        output_file.write("# Copy these entries under [screening] in the launcher configuration.\n")
+        output_file.write("# Each ratio is restricted to its optimized temperature.\n\n")
+        for idx, (opt_cfg, payload) in enumerate(completed):
+            if idx:
+                output_file.write("\n")
+            output_file.write(
+                f"# Target: {opt_cfg.target_molarity_mol_l:.8g} mol/L at "
+                f"{opt_cfg.temperature:.8g} K; achieved: "
+                f"{float(payload['observed_molarity_mol_l']):.8g} mol/L.\n"
+            )
+            output_file.write(render_ratio_snippet(payload["component_ratio"], opt_cfg))
+            output_file.write("\n")
+    return path
+
+
+def run_optimizer(
+    config_path,
+    auto_continue=False,
+    dependency_job_id=None,
+    target_molarity_mol_l=None,
+    temperature=None,
+):
     cfg = load_config(config_path)
-    optimizer_configs = load_optimizer_configs(cfg, target_molarity_filter=target_molarity_mol_l)
+    optimizer_configs = load_optimizer_configs(
+        cfg,
+        target_molarity_filter=target_molarity_mol_l,
+        temperature_filter=temperature,
+    )
     if len(optimizer_configs) > 1:
-        targets = ", ".join(f"{opt_cfg.target_molarity_mol_l:g}" for opt_cfg in optimizer_configs)
-        print(f"Running concentration optimizer for {len(optimizer_configs)} target molarities: {targets}")
+        conditions = ", ".join(
+            f"{opt_cfg.target_molarity_mol_l:g} M at {opt_cfg.temperature:g} K"
+            for opt_cfg in optimizer_configs
+        )
+        print(f"Running concentration optimizer for {len(optimizer_configs)} conditions: {conditions}")
 
     exit_code = 0
     for idx, opt_cfg in enumerate(optimizer_configs, start=1):
         if len(optimizer_configs) > 1:
             print(
                 "\n" + "=" * 100 + "\n"
-                f"Target molarity {idx}/{len(optimizer_configs)}: "
-                f"{opt_cfg.target_molarity_mol_l:.6f} mol/L\n"
+                f"Condition {idx}/{len(optimizer_configs)}: "
+                f"{opt_cfg.target_molarity_mol_l:.6f} mol/L at {opt_cfg.temperature:.3f} K\n"
                 + "=" * 100
             )
         result = run_optimizer_target(
@@ -1165,6 +1256,9 @@ def run_optimizer(config_path, auto_continue=False, dependency_job_id=None, targ
         )
         if result != 0:
             exit_code = result
+    conditions_path = write_launcher_conditions(cfg, load_optimizer_configs(cfg))
+    if conditions_path:
+        print(f"\nCopy-paste launcher conditions written to {conditions_path}")
     return exit_code
 
 
@@ -1174,6 +1268,7 @@ def cli_main():
     parser.add_argument("--auto-continue", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dependency-job-id", help=argparse.SUPPRESS)
     parser.add_argument("--target-molarity-mol-l", type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--temperature", type=float, help=argparse.SUPPRESS)
     args = parser.parse_args()
     sys.exit(
         run_optimizer(
@@ -1181,5 +1276,6 @@ def cli_main():
             auto_continue=args.auto_continue,
             dependency_job_id=args.dependency_job_id,
             target_molarity_mol_l=args.target_molarity_mol_l,
+            temperature=args.temperature,
         )
     )
