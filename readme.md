@@ -16,10 +16,11 @@ The launcher expects this layout:
 
 1. `launch_gromacs.py`
 2. `relaunch_failed_gromacs.py`
-3. `launcher/`
-4. `inputs/`
-5. `mdp_templates/`
-6. `scripts/`
+3. `analyze_gromacs.py`
+4. `launcher/`
+5. `inputs/`
+6. `mdp_templates/`
+7. `scripts/`
 
 Internal package layout:
 
@@ -32,6 +33,7 @@ Internal package layout:
 7. `launcher/relaunch.py`
 8. `launcher/workflow.py`
 9. `launcher/paths.py`
+10. `launcher/analysis/`
 
 Required contents:
 
@@ -112,6 +114,30 @@ The concentration optimizer is handled by a dedicated script:
 
 ```bash
 python optimize_concentration.py config.toml
+```
+
+Post-simulation analyses are handled independently from simulation submission:
+
+```bash
+python analyze_gromacs.py config.toml
+```
+
+The analysis runner visits every configured system and replica and dispatches the enabled wrappers under
+`launcher/analysis/analyses/`. Molarity analysis uses each replica's `4_prod/start.gro` box volume and the
+launcher's final rounded group count. It writes `analysis/molarity_per_replica.csv` with every replica result
+and `analysis/molarity_summary.csv` with the replica mean, sample standard deviation, standard error, minimum,
+maximum, and the number of valid replicas. Missing or invalid structures remain visible as error rows and are
+excluded from the aggregate values.
+
+```toml
+[analysis]
+enabled = true
+output_subdir = "analysis"
+
+[analysis.molarity]
+enabled = true
+groups = ["LiFSI_salt"] # or "all"
+structure = "4_prod/start.gro"
 ```
 
 Each execution advances the workflow by at most one new iteration:

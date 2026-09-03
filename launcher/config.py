@@ -48,6 +48,17 @@ topology_forcefield_include = "forcefield.itp"
 template_dir = "mdp_templates"
 gmx_executable_path = "/apps/GPP/GROMACS/2024.2/INTEL24.2/IMPI21.13/bin/gmx_mpi"
 
+[analysis]
+enabled = true
+output_subdir = "analysis"
+
+[analysis.molarity]
+enabled = true
+# Analyze every configured group, or use a list such as ["LiFSI_salt"].
+groups = ["LiFSI_salt"]
+# Volume source relative to each rep_<N> directory.
+structure = "4_prod/start.gro"
+
 [system_sizing]
 # Options:
 #   "target_atoms"      -> estimate counts from target atom count + ratios
